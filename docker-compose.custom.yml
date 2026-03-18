@@ -1,0 +1,175 @@
+services:
+  frontend:
+    image: wechatopenai/weknora-ui:local
+    container_name: WeKnora-frontend
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    environment:
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
+      - APP_HOST=${APP_HOST:-app}
+      - APP_PORT=${APP_BACKEND_PORT:-8080}
+      - APP_SCHEME=${APP_SCHEME:-http}
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - WeKnora-network
+    restart: unless-stopped
+
+  app:
+    image: wechatopenai/weknora-app:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.app
+    container_name: WeKnora-app
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    volumes:
+      - data-files:/data/files
+      - docreader-tmp:/tmp/docreader:ro
+      - ./skills/preloaded:/app/skills/preloaded
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-debug}
+      - GIN_MODE=${GIN_MODE:-debug}
+      - DISABLE_REGISTRATION=${DISABLE_REGISTRATION:-false}
+      - AUTO_MIGRATE=true
+      - DB_DRIVER=postgres
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${DB_USER:-weknora}
+      - DB_PASSWORD=${DB_PASSWORD:-weknora123}
+      - DB_NAME=${DB_NAME:-weknora}
+      - TZ=Asia/Shanghai
+      - RETRIEVE_DRIVER=milvus
+      - MILVUS_ADDRESS=milvus:19530
+      - MILVUS_COLLECTION=${MILVUS_COLLECTION:-weknora_embeddings}
+      - DOCREADER_ADDR=${DOCREADER_ADDR:-docreader:50051}
+      - DOCREADER_TRANSPORT=${DOCREADER_TRANSPORT:-grpc}
+      - STORAGE_TYPE=local
+      - LOCAL_STORAGE_BASE_DIR=/data/files
+      - AUTO_RECOVER_DIRTY=${AUTO_RECOVER_DIRTY:-true}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - STREAM_MANAGER_TYPE=redis
+      - REDIS_ADDR=redis:6379
+      - REDIS_USERNAME=${REDIS_USERNAME:-}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_DB=${REDIS_DB:-0}
+      - REDIS_PREFIX=${REDIS_PREFIX:-stream:}
+      - ENABLE_GRAPH_RAG=${ENABLE_GRAPH_RAG:-false}
+      - NEO4J_ENABLE=false
+      - TENANT_AES_KEY=${TENANT_AES_KEY:-}
+      - SYSTEM_AES_KEY=${SYSTEM_AES_KEY:-}
+      - CONCURRENCY_POOL_SIZE=${CONCURRENCY_POOL_SIZE:-5}
+      - JWT_SECRET=${JWT_SECRET:-}
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
+      - WEKNORA_SANDBOX_MODE=${WEKNORA_SANDBOX_MODE:-disabled}
+      - WEKNORA_SANDBOX_TIMEOUT=${WEKNORA_SANDBOX_TIMEOUT:-60}
+      - WEKNORA_SANDBOX_DOCKER_IMAGE=${WEKNORA_SANDBOX_DOCKER_IMAGE:-wechatopenai/weknora-sandbox:latest}
+    depends_on:
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_started
+      docreader:
+        condition: service_healthy
+    networks:
+      - WeKnora-network
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  docreader:
+    image: wechatopenai/weknora-docreader:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.docreader
+    container_name: WeKnora-docreader
+    ports:
+      - "${DOCREADER_PORT:-50051}:50051"
+    volumes:
+      - docreader-tmp:/tmp/docreader
+    environment:
+      - DOCREADER_IMAGE_OUTPUT_DIR=/tmp/docreader
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-}
+    healthcheck:
+      test: [ "CMD", "grpc_health_probe", "-addr=:50051" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - WeKnora-network
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  postgres:
+    image: paradedb/paradedb:v0.21.4-pg17
+    container_name: WeKnora-postgres
+    environment:
+      - POSTGRES_USER=${DB_USER:-weknora}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-weknora123}
+      - POSTGRES_DB=${DB_NAME:-weknora}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - WeKnora-network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${DB_USER:-weknora}" ]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.0-alpine
+    container_name: WeKnora-redis
+    command: redis-server --appendonly yes ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
+    restart: always
+    networks:
+      - WeKnora-network
+
+  milvus:
+    image: milvusdb/milvus:v2.6.11
+    container_name: WeKnora-milvus
+    security_opt:
+      - seccomp:unconfined
+    command: [ "milvus", "run", "standalone" ]
+    environment:
+      - ETCD_USE_EMBED=true
+      - ETCD_DATA_DIR=/var/lib/milvus/etcd
+      - COMMON_STORAGETYPE=local
+      - DEPLOY_MODE=STANDALONE
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9091/healthz" ]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    networks:
+      - WeKnora-network
+    restart: unless-stopped
+
+networks:
+  WeKnora-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  data-files:
+  docreader-tmp:
+  milvus_data:

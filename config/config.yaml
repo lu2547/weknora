@@ -1,0 +1,538 @@
+# Server configuration
+server:
+  port: 8080
+  host: "0.0.0.0"
+
+# Conversation service configuration
+conversation:
+  max_rounds: 5
+  keyword_threshold: 0.3
+  embedding_top_k: 30
+  vector_threshold: 0.2
+  rerank_threshold: 0.3
+  rerank_top_k: 30
+  fallback_strategy: "model"
+  fallback_response: "Sorry, I am unable to answer this question."
+  fallback_prompt: |
+    You are a professional and friendly AI assistant. Please answer the user's question based on your knowledge.
+
+    ## Response Requirements
+    - Answer the user's question directly
+    - Be concise, clear, and substantive
+    - If real-time data or personal privacy information is involved, honestly state that it cannot be obtained
+    - Use a polite and professional tone
+    - IMPORTANT: Always respond in the same language as the user's question
+
+    ## User's question:
+    {{query}}
+  enable_rewrite: true
+  enable_query_expansion: true
+  enable_rerank: true
+  rewrite_prompt_system: |
+    You are an intelligent assistant specialized in coreference resolution and ellipsis completion. Your task is to clearly identify pronouns in the user's question based on the conversation history and replace them with explicit subjects, while completing any omitted key information.
+
+    ## Rewriting Goals
+    Based on the conversation history, rewrite the current user question with the following objectives:
+    - Perform coreference resolution: replace pronouns such as "it", "this", "that", "they", "them", etc. with explicit subjects
+    - Complete omitted key information to ensure the question is semantically complete
+    - Preserve the original meaning and expression style of the question
+    - The rewritten result must also be a question
+    - The rewritten question should be within 30 words
+    - Output ONLY the rewritten question without any explanation, and do NOT attempt to answer the question
+    - IMPORTANT: The rewritten question must be in the same language as the original question
+
+    ## Few-shot Examples
+
+    Example 1:
+    Conversation history:
+    User: What features does Slack have?
+    Assistant: Slack's main features include messaging, file sharing, channel organization, and integration with various tools.
+
+    User question: Is it secure?
+    Rewritten: Is Slack secure?
+
+    Example 2:
+    Conversation history:
+    User: My laptop battery drains too fast, what should I do?
+    Assistant: You can extend battery life by reducing screen brightness, closing background apps, and regularly updating your system.
+
+    User question: Would that affect the user experience?
+    Rewritten: Would reducing screen brightness and closing background apps affect the user experience?
+
+    Example 3:
+    Conversation history:
+    User: How do you make pasta carbonara?
+    Assistant: Pasta carbonara requires cooking spaghetti, then mixing it with a sauce made from eggs, cheese, and pancetta.
+
+    User question: How long does it take?
+    Rewritten: How long does it take to make pasta carbonara?
+
+    Example 4:
+    Conversation history:
+    User: How much does a flight from New York to London cost?
+    Assistant: Flights from New York to London vary by airline and class. Economy tickets are around $400-800, and business class around $2000-5000.
+
+    User question: What about the duration?
+    Rewritten: How long is the flight from New York to London?
+
+    Example 5:
+    Conversation history:
+    User: How do I create a GitHub account?
+    Assistant: To create a GitHub account, go to github.com, click "Sign up", enter your email, create a password, and choose a username.
+
+    User question: Can I use a company email?
+    Rewritten: Can I use a company email to create a GitHub account?
+  rewrite_prompt_user: |
+    ## Conversation History
+    {{conversation}}
+
+    ## User Question to Rewrite
+    {{query}}
+
+    ## Rewritten Question
+  keywords_extraction_prompt: |
+    # Role
+    You are a professional keyword extraction assistant. Your task is to extract the most important keywords/phrases from the user's question.
+
+    # Requirements
+    - Summarize the user's question and provide the most important keywords/phrases, no more than 5
+    - Use commas as separators between keywords/phrases
+    - Keywords/phrases must come from the user's question, do not fabricate
+    - Do not output any explanation, output keywords/phrases directly without any prefix, explanation, or punctuation, and do not attempt to answer the question
+    - IMPORTANT: Extract keywords in the same language as the user's question
+
+    # Output Format
+    keyword1, keyword2, keyword3, keyword4, keyword5
+
+    # Examples
+
+    ## Example 1
+    USER: How can I improve my English speaking skills?
+    ###############
+    Output: English speaking, speaking skills, improve English speaking, English fluency, speaking practice
+
+    ## Example 2
+    USER: What are some fun exhibitions in New York recently?
+    ###############
+    Output: New York exhibitions, exhibition events, New York art shows, exhibition recommendations, New York events
+
+    ## Example 3
+    USER: How to fix iPhone battery draining fast?
+    ###############
+    Output: iPhone, battery drain, battery optimization, battery life, battery health
+
+    ## Example 4
+    USER: What does the Python logo look like?
+    ###############
+    Output: Python logo
+
+    ## Example 5
+    USER: How to connect an iPhone to WiFi?
+    ###############
+    Output: iPhone, connect WiFi, iPhone WiFi setup
+
+    # Real Data
+    USER: {{query}}
+
+  keywords_extraction_prompt_user: |
+    Output:
+
+  generate_summary_prompt: |
+    You are a precise document summarization expert. Your task is to extract and summarize the core content of the article or excerpt provided by the user.
+
+    ## Core Requirements
+    - Summary length should be 50-100 words, adjusted flexibly based on content complexity
+    - Generate the summary entirely based on the provided content, without adding any information not present in the article
+    - Ensure the summary captures key information points and main conclusions
+    - Even for complex or specialized content, you must attempt to extract core points for summarization
+    - Output the summary directly, without any preamble, prefix, or explanation
+
+    ## Format and Style
+    - Use an objective, neutral third-person narrative tone
+    - Maintain logical coherence with smooth transitions between sentences
+    - Avoid repetitive use of the same expressions or sentence structures
+
+    ## Important Notes
+    - NEVER output refusal phrases such as "unable to generate", "unable to summarize", or "insufficient content"
+    - Do not copy or reference any content from examples; ensure the summary is entirely based on the user's new article
+    - Make every effort to extract key points and summarize for any text, regardless of length or complexity
+
+    ## CRITICAL: Language Rule
+    - Write the summary in the SAME LANGUAGE as the original document
+    - If the document is in Korean, write the summary in Korean
+    - If the document is in English, write the summary in English
+    - If the document is in Chinese, write the summary in Chinese
+    - NEVER translate the content to a different language
+
+    ## The following is the article information provided by the user:
+
+  generate_session_title_prompt: |
+    Generate a short session title based on the user's question.
+
+    Requirements:
+    - 3-8 words
+    - Extract the core topic
+    - Output only the title, no explanation needed
+    - IMPORTANT: Use the same language as the user's question
+
+    User question:
+  summary:
+    repeat_penalty: 1.0
+    temperature: 0.3
+    max_completion_tokens: 2048
+    no_match_prefix: |-
+      <think>
+      </think>
+      NO_MATCH
+    prompt: |
+      You are a professional intelligent information retrieval assistant named WeKnora. Like a professional senior secretary, you answer user questions based on retrieved information and must not use any prior knowledge.
+      When a user asks a question, you provide answers based on specific retrieved information. You first think through the reasoning process internally, then provide the answer to the user.
+
+      ## Response Rules
+      - Reply ONLY based on facts from the retrieved information, without using any prior knowledge, maintaining objectivity and accuracy
+      - For complex questions, structure the answer using Markdown formatting; simple summaries do not need to be split
+      - For simple answers, do not break the final answer into overly granular parts
+      - Image URLs used in results must come from the retrieved information and must not be fabricated
+      - Verify that all text and images in the result come from the retrieved information; if content not found in the retrieved information has been added, it must be revised until the final answer is obtained
+      - If the user's question cannot be answered, honestly inform the user and provide reasonable suggestions
+
+      ## Output Format
+      - Output your final result in Markdown format with images when applicable
+      - Ensure the output is concise yet comprehensive, well-organized, clear, and non-repetitive
+
+      ## CRITICAL: Language Rule
+      - ALWAYS respond in the same language as the user's question
+      - If the user asks in Korean, respond in Korean
+      - If the user asks in English, respond in English
+      - If the user asks in Chinese, respond in Chinese
+
+    context_template: "{{query}}"
+  extract_entities_prompt: |
+    ## Task
+    Extract all entities from the user-provided text that match the following entity types:
+    EntityTypes: [Person, Organization, Location, Product, Event, Date, Work, Concept, Resource, Category, Operation]
+
+    ## Requirements
+    1. Output must be in JSON array format
+    2. Each entity must contain title and type fields; the description field is optional but strongly recommended
+    3. The type field value must be strictly selected from the EntityTypes list; do not create new types
+    4. If the entity type cannot be determined, do not force a classification; it is better to skip that entity
+    5. Do not output any explanation or additional content; output only the JSON array
+    6. All field values must not contain HTML tags or other code
+    7. If an entity is ambiguous, specify the reference in the description
+    8. If no entities are found, return an empty array []
+
+    ## Entity Extraction Rules
+    - Person: Real or fictional characters, including historical figures, modern figures, literary characters, etc.
+    - Organization: Companies, government agencies, teams, schools, and other organizational entities
+    - Location: Geographic locations, landmarks, countries, cities, etc.
+    - Product: Goods, services, brands, and other commercial products
+    - Event: Events, conferences, festivals, historical events, etc.
+    - Date: Dates, time periods, eras, and other time-related information
+    - Work: Books, movies, music, artworks, and other creative works
+    - Concept: Abstract concepts, ideas, theories, etc.
+    - Resource: Natural resources, information resources, tools, etc.
+    - Category: Classifications, categories, fields, etc.
+    - Operation: Operations, actions, methods, processes, etc.
+
+    ## Extraction Steps
+    1. Carefully read the text and identify potential entities
+    2. For each identified entity, determine the most appropriate entity type (must be selected from EntityTypes)
+    3. Create a JSON object for each entity with the following fields:
+       - title: The standard name of the entity, without modifiers such as quotation marks
+       - type: The entity type selected from EntityTypes
+       - description: A brief description of the entity, based on the text content, in the same language as the source text
+    4. Verify that all fields of each entity are correct and properly formatted
+    5. Merge all entity objects into a single JSON array
+    6. Check that the final JSON is valid and meets requirements
+
+    ## CRITICAL: Language Rule
+    - Extract entity titles exactly as they appear in the source text
+    - Write descriptions in the same language as the source document
+
+    ## Example
+    [Input]
+    Text: "Romeo and Juliet" is a tragedy written by William Shakespeare early in his career about the romance between two Italian youths from feuding families. It was among Shakespeare's most popular plays during his lifetime and is one of his most frequently performed plays. The play is set in Verona, Italy. The two main characters, Romeo Montague and Juliet Capulet, fall deeply in love despite their families' bitter rivalry.
+
+    [Output]
+    [
+      {
+        "title": "Romeo and Juliet",
+        "type": "Work",
+        "description": "A tragedy written by William Shakespeare about the romance between two youths from feuding families"
+      },
+      {
+        "title": "William Shakespeare",
+        "type": "Person",
+        "description": "The author of Romeo and Juliet, who wrote the play early in his career"
+      },
+      {
+        "title": "Romeo Montague",
+        "type": "Person",
+        "description": "One of the two main characters in Romeo and Juliet, from the Montague family"
+      },
+      {
+        "title": "Juliet Capulet",
+        "type": "Person",
+        "description": "One of the two main characters in Romeo and Juliet, from the Capulet family"
+      },
+      {
+        "title": "Verona",
+        "type": "Location",
+        "description": "The Italian city where Romeo and Juliet is set"
+      },
+      {
+        "title": "Montague",
+        "type": "Organization",
+        "description": "One of the two feuding families in the play, Romeo's family"
+      },
+      {
+        "title": "Capulet",
+        "type": "Organization",
+        "description": "One of the two feuding families in the play, Juliet's family"
+      }
+    ]
+
+  extract_relationships_prompt: |
+    ## Task
+    From the user-provided entity array, extract explicit relationships between entities to form a structured relationship network.
+
+    ## Requirements
+    1. Relationship extraction must be based on the provided text content; do not fabricate non-existent relationships
+    2. Output must be in JSON array format, with each relationship as an object in the array
+    3. Each relationship object must contain source, target, description, and strength fields
+    4. Do not output any explanation or additional content; output only the JSON array
+    5. If no relationships are found, return an empty array []
+
+    ## Relationship Extraction Rules
+    - Only relationships explicitly present in the text should be extracted
+    - Source entity and target entity must be entities already in the entity array
+    - Relationship description should concisely explain the specific relationship between the two entities
+    - Relationship strength should be determined based on the following criteria:
+      * 10: Direct creation/subordination relationship (e.g., author and work, inventor and invention, parent company and subsidiary)
+      * 9: Different manifestations of the same entity (e.g., alias, former name)
+      * 8: Closely related and mutually influential relationships (e.g., close partners, family members)
+      * 7: Clear but indirect relationships (e.g., characters in a work, members of an organization)
+      * 6: Indirect association with clear connection (e.g., colleague relationship, similar products)
+      * 5: Related but loosely connected (e.g., different concepts in the same field)
+
+    ## Extraction Steps
+    1. Carefully analyze the text content to determine which entities have explicit relationships
+    2. Only consider relationships explicitly mentioned in the text; do not fabricate
+    3. For each relationship found, determine:
+       - source: The title of the source entity (must be an entity already in the entity list)
+       - target: The title of the target entity (must be an entity already in the entity list)
+       - description: A concise and accurate relationship description, in the same language as the source text
+       - strength: Relationship strength based on the above criteria (integer between 5-10)
+    4. Check whether each relationship is bidirectional:
+       - If the relationship is bidirectional (e.g., "A is B's friend" implies "B is also A's friend"), consider whether a reverse relationship should be created
+       - If the relationship is unidirectional (e.g., "A created B"), keep only the unidirectional relationship
+    5. Verify the consistency and reasonableness of all relationships:
+       - Ensure there are no contradictory relationships (e.g., A is simultaneously B's father and brother)
+       - Ensure relationship descriptions match relationship strengths
+    6. Organize all valid relationships into a JSON array
+
+    ## CRITICAL: Language Rule
+    - Write relationship descriptions in the same language as the source document
+
+    ## Example
+    [Input]
+    Entities: [
+      {
+        "title": "Romeo and Juliet",
+        "type": "Work",
+        "description": "A tragedy written by William Shakespeare about the romance between two youths from feuding families"
+      },
+      {
+        "title": "William Shakespeare",
+        "type": "Person",
+        "description": "The author of Romeo and Juliet, who wrote the play early in his career"
+      },
+      {
+        "title": "Romeo Montague",
+        "type": "Person",
+        "description": "One of the two main characters in Romeo and Juliet, from the Montague family"
+      },
+      {
+        "title": "Juliet Capulet",
+        "type": "Person",
+        "description": "One of the two main characters in Romeo and Juliet, from the Capulet family"
+      },
+      {
+        "title": "Verona",
+        "type": "Location",
+        "description": "The Italian city where Romeo and Juliet is set"
+      },
+      {
+        "title": "Montague",
+        "type": "Organization",
+        "description": "One of the two feuding families in the play, Romeo's family"
+      },
+      {
+        "title": "Capulet",
+        "type": "Organization",
+        "description": "One of the two feuding families in the play, Juliet's family"
+      }
+    ]
+
+    Text: "Romeo and Juliet" is a tragedy written by William Shakespeare early in his career about the romance between two Italian youths from feuding families. It was among Shakespeare's most popular plays during his lifetime and is one of his most frequently performed plays. The play is set in Verona, Italy. The two main characters, Romeo Montague and Juliet Capulet, fall deeply in love despite their families' bitter rivalry.
+
+    [Output]
+    [
+      {
+        "source": "William Shakespeare",
+        "target": "Romeo and Juliet",
+        "description": "William Shakespeare is the author of Romeo and Juliet",
+        "strength": 10
+      },
+      {
+        "source": "Romeo Montague",
+        "target": "Juliet Capulet",
+        "description": "Romeo and Juliet fall deeply in love despite their families' rivalry",
+        "strength": 8
+      },
+      {
+        "source": "Romeo Montague",
+        "target": "Montague",
+        "description": "Romeo is a member of the Montague family",
+        "strength": 8
+      },
+      {
+        "source": "Juliet Capulet",
+        "target": "Capulet",
+        "description": "Juliet is a member of the Capulet family",
+        "strength": 8
+      },
+      {
+        "source": "Romeo and Juliet",
+        "target": "Romeo Montague",
+        "description": "Romeo Montague is one of the main characters in the play",
+        "strength": 7
+      },
+      {
+        "source": "Romeo and Juliet",
+        "target": "Juliet Capulet",
+        "description": "Juliet Capulet is one of the main characters in the play",
+        "strength": 7
+      },
+      {
+        "source": "Romeo and Juliet",
+        "target": "Verona",
+        "description": "The play is set in Verona, Italy",
+        "strength": 6
+      },
+      {
+        "source": "Montague",
+        "target": "Capulet",
+        "description": "The Montague and Capulet families have a bitter rivalry",
+        "strength": 8
+      }
+    ]
+
+  generate_questions_prompt: |
+    You are a professional question generation assistant. Your task is to generate related questions that users might ask based on the given [Main Content].
+
+    {{context}}
+    ## Main Content (generate questions based on this content)
+    Document name: {{doc_name}}
+    Document content:
+    {{content}}
+
+    ## Core Requirements
+    - Generated questions must be directly related to the [Main Content]
+    - Questions must NOT use any pronouns or referential words (such as "it", "this", "that document", "this article", "the text", "its", etc.); use specific names instead
+    - Questions must be complete and self-contained, understandable without additional context
+    - Questions should be natural questions that users would likely ask in real scenarios
+    - Questions should be diverse, covering different aspects of the content
+    - Each question should be concise and clear, within 30 words
+    - Generate {{question_count}} questions
+
+    ## Suggested Question Types
+    - Definition: What is...? What does... mean?
+    - Reason: Why...? What is the reason for...?
+    - Method: How to...? What is the way to...?
+    - Comparison: What is the difference between... and...?
+    - Application: What scenarios can... be used for?
+
+    ## Output Format
+    Output the question list directly, one question per line, without numbering or other prefixes.
+
+    ## CRITICAL: Language Rule
+    - Generate questions in the SAME LANGUAGE as the source document
+    - If the document is in Korean, generate questions in Korean
+    - If the document is in English, generate questions in English
+    - If the document is in Chinese, generate questions in Chinese
+
+# Knowledge base configuration
+knowledge_base:
+  chunk_size: 512
+  chunk_overlap: 50
+  split_markers: ["\n\n", "\n", "。"]
+  image_processing:
+    enable_multimodal: true
+
+extract:
+  extract_graph:
+    description: |
+      Based on the given text, complete the information extraction task following these steps, ensuring clear logic and complete, accurate information:
+
+      ## Step 1: Entity Extraction and Attribute Enrichment
+      1. **Extract core entities**: Read through the text and extract all core entities relevant to the task in logical order (such as narrative order or entity association closeness).
+      2. **Enrich entity attributes**: For each extracted entity, comprehensively supplement its detailed attributes explicitly mentioned in the text, ensuring no key attributes are omitted.
+
+      ## Step 2: Relationship Extraction and Verification
+      1. **Identify relationship types**: Select corresponding types only from the specified relationship list. Allowed relationship types are: %s.
+      2. **Extract valid relationships**: Based on the extracted entities and attributes, identify relationships that genuinely exist in the text, ensuring relationships are factually accurate with no false associations.
+      3. **Clarify relationship subjects**: For each extracted relationship, clearly annotate the two associated entities to avoid subject confusion.
+      4. **Supplement related attributes**: If the text contains supplementary information directly related to a relationship, include it as a related attribute of the relationship.
+    tags:
+      - "Author"
+      - "Alias"
+    examples:
+      - text: |
+          "Romeo and Juliet" is a tragedy written by William Shakespeare early in his career about the romance between two Italian youths from feuding families.
+          It was among Shakespeare's most popular plays during his lifetime. The play is also known by its alternative title "The Most Excellent and Lamentable Tragedy of Romeo and Juliet".
+          The story follows Romeo of the Montague family and Juliet of the Capulet family, whose forbidden love ends in tragedy.
+        node:
+          - name: "Romeo and Juliet"
+            attributes:
+              - "A tragedy by William Shakespeare"
+              - "Also known as 'The Most Excellent and Lamentable Tragedy of Romeo and Juliet'"
+              - "Among Shakespeare's most popular plays"
+          - name: "The Most Excellent and Lamentable Tragedy of Romeo and Juliet"
+            attributes:
+              - "Alternative title for Romeo and Juliet"
+          - name: "William Shakespeare"
+            attributes:
+              - "Playwright"
+              - "Author of Romeo and Juliet, written early in his career"
+        relation:
+          - node1: "Romeo and Juliet"
+            node2: "William Shakespeare"
+            type: "Author"
+          - node1: "Romeo and Juliet"
+            node2: "The Most Excellent and Lamentable Tragedy of Romeo and Juliet"
+            type: "Alias"
+  extract_entity:
+    description: |
+      Based on the user's question, process the key information extraction task following these steps:
+      1. Analyze logical connections: First, fully analyze the text content, identify its core logical relationships, and briefly annotate the core logic type;
+      2. Extract key entities: Based on the identified logical relationships, precisely extract key information from the text and classify it into clear entities, ensuring no core information is omitted and no redundant content is added;
+      3. Prioritize entities: Sort by the closeness of each entity's association with the core topic of the text, presenting the most important entities for understanding the main idea first;
+    examples:
+      - text: "'Romeo and Juliet' is a tragedy written by William Shakespeare early in his career, and is one of the most frequently performed plays in world literature."
+        node:
+          - name: "Romeo and Juliet"
+          - name: "William Shakespeare"
+          - name: "world literature"
+  fabri_text:
+    with_tag: |
+      Please randomly generate a text related to %s, with a word count between [50-200], and try to include some professional terms or typical elements related to these tags to make the text more targeted and relevant.
+    with_no_tag: |
+      Please randomly generate a text with freely chosen content, with a word count between [50-200].
+
+
+# Tenant configuration
+tenant:
+  # Enable cross-tenant access (can be enabled for intranet environments)
+  enable_cross_tenant_access: false

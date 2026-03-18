@@ -1,0 +1,48 @@
+# Fallback prompt templates
+templates:
+  - id: "default_fallback"
+    name: "Standard Fallback"
+    description: "Standard fallback response template"
+    content: |
+      Sorry, I could not find content directly related to your question in the knowledge base.
+
+      You can try:
+      1. Rephrasing your question in a different way
+      2. Providing more specific information
+      3. Consulting a professional in the relevant field
+
+      If you have other questions, I'm happy to continue helping you.
+
+  - id: "polite_fallback"
+    name: "Polite Fallback"
+    description: "More polite and friendly fallback response"
+    content: |
+      I'm sorry, I'm currently unable to provide an accurate answer to your question. This may be because:
+      - The question is beyond my knowledge scope
+      - The knowledge base does not yet contain relevant content
+
+      Suggestions:
+      1. Try rephrasing with different keywords
+      2. Break down your question into more specific sub-questions
+      3. Contact customer support for assistance
+
+      Thank you for your understanding, and I look forward to helping you with other questions!
+
+  - id: "brief_fallback"
+    name: "Brief Fallback"
+    description: "Short fallback response"
+    content: "Sorry, I'm unable to answer this question at the moment. Please try rephrasing your question, or contact customer support."
+
+  - id: "model_fallback"
+    name: "Model Fallback"
+    description: "Fallback prompt that delegates to the model for generation"
+    content: |
+      No content directly related to the user's question was found in the knowledge base. Please use your general knowledge to help the user answer the question as best as possible.
+
+      Important Notes:
+      1. Clearly inform the user that this answer is based on general knowledge, not knowledge base content
+      2. If the question involves specific domains or requires the latest information, suggest the user consult official resources
+      3. Maintain accuracy and objectivity in the response
+      4. IMPORTANT: Always respond in the same language as the user's question
+
+      User question: {{query}}

@@ -1,0 +1,67 @@
+# Context templates
+templates:
+  - id: "default_context"
+    name: "Standard Template"
+    description: "Standard context formatting template"
+    has_knowledge_base: true
+    content: |
+      Answer the user's question based on the following reference materials. IMPORTANT: Always respond in the same language as the user's question.
+
+      Reference materials:
+      {{contexts}}
+
+      User question: {{query}}
+
+      Please answer based on the above reference materials. If the materials are insufficient to answer the question, clearly state so.
+
+  - id: "detailed_context"
+    name: "Detailed Template"
+    description: "Context template with detailed instructions"
+    has_knowledge_base: true
+    content: |
+      ## Task Description
+      Answer the user's question accurately and comprehensively based on the provided reference materials.
+
+      ## Reference Materials
+      {{contexts}}
+
+      ## User Question
+      {{query}}
+
+      ## Response Requirements
+      1. Answer only based on reference materials, do not fabricate information
+      2. If multiple materials conflict, provide a comprehensive analysis
+      3. Cite sources appropriately to enhance credibility
+      4. If materials are insufficient, clearly state so
+      5. IMPORTANT: Always respond in the same language as the user's question
+
+      Current time: {{current_time}} {{current_week}}
+
+  - id: "simple_context"
+    name: "Simple Template"
+    description: "Simple context template"
+    has_knowledge_base: true
+    content: |
+      Reference materials:
+      {{contexts}}
+
+      Question: {{query}}
+
+      Please answer the above question. IMPORTANT: Respond in the same language as the question.
+
+  - id: "qa_context"
+    name: "Q&A Template"
+    description: "Template specialized for Q&A scenarios"
+    has_knowledge_base: true
+    content: |
+      You need to answer a question. Below are potentially relevant materials:
+
+      {{contexts}}
+
+      The user's question is: {{query}}
+
+      Please answer the question based on the above materials. Requirements:
+      - Answer the question directly, do not repeat the question
+      - If the materials do not contain relevant information, state so
+      - Keep the answer concise and accurate
+      - IMPORTANT: Always respond in the same language as the user's question
