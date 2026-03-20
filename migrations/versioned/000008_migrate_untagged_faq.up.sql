@@ -1,6 +1,12 @@
 -- Migration: Create "未分类" tag for each knowledge base that has untagged entries
 -- and update chunks, knowledges, and embeddings to reference the new tag
-ALTER EXTENSION pg_search UPDATE;
+
+-- Only update pg_search if it's installed (ParadeDB environments only)
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_search') THEN
+        ALTER EXTENSION pg_search UPDATE;
+    END IF;
+END $$;
 
 DO $$
 DECLARE
