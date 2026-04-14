@@ -1070,15 +1070,23 @@ func (t *KnowledgeSearchTool) formatOutput(
 	output += fmt.Sprintf("Found %d relevant results", len(results))
 	output += "\n\n"
 
-	// Count results by KB
+	// Count results by KB and pre-collect title map
 	kbCounts := make(map[string]int)
+	knowledgeTitleMap := make(map[string]string) // knowledge_id -> title (pre-built to avoid exposing raw UUIDs)
 	for _, r := range results {
 		kbCounts[r.KnowledgeID]++
+		if r.KnowledgeTitle != "" {
+			knowledgeTitleMap[r.KnowledgeID] = r.KnowledgeTitle
+		}
 	}
 
 	output += "Knowledge Base Coverage:\n"
 	for kbID, count := range kbCounts {
-		output += fmt.Sprintf("  - %s: %d results\n", kbID, count)
+		kbTitle := knowledgeTitleMap[kbID]
+		if kbTitle == "" {
+			kbTitle = kbID
+		}
+		output += fmt.Sprintf("  - %s: %d results\n", kbTitle, count)
 	}
 	output += "\n=== Detailed Results ===\n\n"
 
@@ -1091,7 +1099,7 @@ func (t *KnowledgeSearchTool) formatOutput(
 	// Track chunks per knowledge for statistics
 	knowledgeChunkMap := make(map[string]map[int]bool) // knowledge_id -> set of chunk_index
 	knowledgeTotalMap := make(map[string]int64)        // knowledge_id -> total chunks
-	knowledgeTitleMap := make(map[string]string)       // knowledge_id -> title
+	// Note: knowledgeTitleMap is already pre-built above for the Coverage section
 
 	for i, result := range results {
 		var faqMeta *types.FAQChunkMetadata

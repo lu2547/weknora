@@ -32,6 +32,7 @@ type OpenAIEmbedRequest struct {
 	Input                []string `json:"input"`
 	EncodingFormat       string   `json:"encoding_format,omitempty"`
 	TruncatePromptTokens int      `json:"truncate_prompt_tokens,omitempty"`
+	Dimensions           int      `json:"dimensions,omitempty"`
 }
 
 // OpenAIEmbedResponse represents an OpenAI embedding response
@@ -141,6 +142,7 @@ func (e *OpenAIEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]fl
 		Input:                texts,
 		EncodingFormat:       "float",
 		TruncatePromptTokens: e.truncatePromptTokens,
+		Dimensions:           e.dimensions,
 	}
 
 	jsonData, err := json.Marshal(reqBody)

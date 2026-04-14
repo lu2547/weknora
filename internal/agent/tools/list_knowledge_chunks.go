@@ -248,9 +248,10 @@ func (t *ListKnowledgeChunksTool) buildOutput(
 	builder.WriteString("=== Knowledge Document Chunks ===\n\n")
 
 	if knowledgeTitle != "" {
-		fmt.Fprintf(builder, "Document: %s (%s)\n", knowledgeTitle, knowledgeID)
+		fmt.Fprintf(builder, "Document: %s\n", knowledgeTitle)
+		fmt.Fprintf(builder, "Document ID (knowledge_id, NOT a chunk_id): %s\n", knowledgeID)
 	} else {
-		fmt.Fprintf(builder, "Document ID: %s\n", knowledgeID)
+		fmt.Fprintf(builder, "Document ID (knowledge_id, NOT a chunk_id): %s\n", knowledgeID)
 	}
 	fmt.Fprintf(builder, "Total chunks: %d\n", total)
 
