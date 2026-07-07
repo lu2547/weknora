@@ -102,18 +102,17 @@ type ImageInfo struct {
 // and maintains its positional relationship with the original text
 // Chunks can be independently embedded as vectors and retrieved, supporting precise content localization
 type Chunk struct {
-	// Unique identifier of the chunk, using UUID format
-	ID string `json:"id"                       gorm:"type:varchar(36);primaryKey"`
-	// SeqID is an auto-increment integer ID for external API usage (FAQ entries)
-	SeqID int64 `json:"seq_id"                   gorm:"type:bigint;uniqueIndex;autoIncrement"`
-	// Tenant ID, used for multi-tenant isolation
-	TenantID uint64 `json:"tenant_id"`
-	// ID of the parent knowledge, associated with the Knowledge model
-	KnowledgeID string `json:"knowledge_id"`
-	// ID of the knowledge base, for quick location
-	KnowledgeBaseID string `json:"knowledge_base_id"`
-	// Optional tag ID for categorization within a knowledge base (used for FAQ)
-	TagID string `json:"tag_id"                   gorm:"type:varchar(36);index"`
+	// Unique identifier of the chunk (PK column: id_chunk)
+	ID string `json:"id"                       gorm:"column:id_chunk;type:varchar(36);primaryKey"`
+	// SeqID is a globally unique sequential ID (from chunk_seq_id_seq)
+	// 加 default tag 使 GORM 在零值时跳过该列插入，让 PG 使用 DEFAULT nextval()，避免多行全部 seq_id=0 冲突。
+	SeqID int64 `json:"seq_id"                   gorm:"type:bigint;not null;uniqueIndex;default:nextval('chunk_seq_id_seq')"`
+	// ID of the parent knowledge (FK column: id_knowledge)
+	KnowledgeID string `json:"knowledge_id"             gorm:"column:id_knowledge"`
+	// ID of the knowledge base (FK column: id_knowledge_base)
+	KnowledgeBaseID string `json:"knowledge_base_id"        gorm:"column:id_knowledge_base"`
+	// Optional tag ID for categorization within a knowledge base
+	TagID string `json:"tag_id"                   gorm:"type:varchar(64);index"`
 	// Actual text content of the chunk
 	Content string `json:"content"`
 	// Index position of the chunk in the original document
@@ -153,4 +152,9 @@ type Chunk struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	// Soft delete marker, supports data recovery
 	DeletedAt gorm.DeletedAt `json:"deleted_at"               gorm:"index"`
+}
+
+// TableName overrides GORM's default plural table name.
+func (Chunk) TableName() string {
+	return "chunk"
 }

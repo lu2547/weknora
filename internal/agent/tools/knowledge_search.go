@@ -21,67 +21,68 @@ import (
 
 var knowledgeSearchTool = BaseTool{
 	name: ToolKnowledgeSearch,
-	description: `Semantic/vector search tool for retrieving knowledge by meaning, intent, and conceptual relevance.
+	description: `「知识内容检索」工具：在知识库的**分片（chunk）正文**上做语义/向量检索，按含义、意图、概念相关性召回片段。
 
-This tool uses embeddings to understand the user's query and find semantically similar content across knowledge base chunks.
+底层用 embedding 理解 query，在分片集合中找语义相似的段落；必要时会叠加 rerank。
+**粒度是「分片正文」，不是「整篇文档」**。
 
-## Purpose
-Designed for high-level understanding tasks, such as:
-- conceptual explanations
-- topic overviews
-- reasoning-based information needs
-- contextual or intent-driven retrieval
-- queries that cannot be answered with literal keyword matching
+## 与 select_documents 的分工（使用前必读）
+本工具与 select_documents 是两阶段协作，职责划分如下：
 
-The tool searches by MEANING rather than exact text. It identifies chunks that are conceptually relevant even when the wording differs.
+1. **select_documents**：**文档级**挑选，回答「要看哪几份文档」。
+   输入含主题 / 部门标签 / 文件名 / 文件类型 / 时间范围，输出 knowledge_id 列表 + 摘要，**不返回正文**。
+2. **knowledge_search（本工具）**：**分片级**内容检索，回答「从内容里提取相关片段」。
+   输出 chunk 正文，可用于回答、解释、综述、对比。
 
-## What the Tool Does NOT Do
-- Does NOT perform exact keyword matching
-- Does NOT search for specific named entities
-- Should NOT be used for literal lookup tasks
-- Should NOT receive long raw text or user messages as queries
-- Should NOT be used to locate specific strings or error codes
+因此：
+- 当用户的诉求是「**列 / 找 / 盘点 / 有哪些** 文档」（例：「有哪些年度报告」「历年企业年金基金摘要」
+  「人设部最近3年的报告」「所有财报 PDF」）——
+  **先调 select_documents 拿候选文档，而不是直接用本工具**。本工具不适合做"文档列举"。
+- 当用户的诉求是「**解释 / 总结 / 讨论 / 对比 / 回答** 某个主题或问题」——才用本工具深挖 chunk。
+- 如果确实要「先挑文档再挖内容」，先跑 select_documents，再把得到的 knowledge_base_ids（或在外部
+  按 knowledge_id 过滤后）传入本工具。
 
-For literal/keyword/entity search, another tool should be used.
+## 适用场景
+- 概念解释、原理说明；
+- 在已圈定范围内做主题综述（例如给定几份文档，问「它们共同的结论」）；
+- 基于意图/上下文的推理型检索；
+- 用字面关键词难以覆盖的语义问答。
 
-## Required Input Behavior
-"queries" must contain **1–5 short, well-formed semantic questions or conceptual statements** that clearly express the meaning the model is trying to retrieve.
+## 不适用场景（Do NOT）
+- ❌ 列 / 盘点 / 发现「**有哪些文档**」—— 用 select_documents；
+- ❌ 字面关键词 / 命名实体 / 错误码精确匹配 —— 用 grep_chunks；
+- ❌ 把用户原话或长段未加工文本直接当 query；
+- ❌ 精确字符串 / 代码片段定位。
 
-Each query should represent a **concept, idea, topic, explanation, or intent**, such as:
-- abstract topics
-- definitions
-- mechanisms
-- best practices
-- comparisons
-- how/why questions
+## queries 参数的写法要求
+必须是 **1–5 条精炼的语义问题或概念短句**，每一条独立表达一个要检索的含义。
 
-Avoid:
-- keyword lists
-- raw text from user messages
-- full paragraphs
-- unprocessed input
+好的示例（good）：
+- "RAG 的核心思想是什么"
+- "向量检索与 BM25 的差异"
+- "知识库分片策略的常见考虑"
+- "如何评估召回质量"
 
-## Examples of valid query shapes (not content):
-- "What is the main idea of..."
-- "How does X work in general?"
-- "Explain the purpose of..."
-- "What are the key principles behind..."
-- "Overview of ..."
+不好的示例（bad，会导致检索质量差）：
+- 直接粘用户原话："帮我找一下关于企业年金基金的年度报告"
+- 关键词列表："企业年金基金, 年报, 2023"
+- 整段背景信息 / 长段落
 
-## Parameters
-- queries (required): 1–5 semantic questions or conceptual statements.
-  These should reflect the meaning or topic you want embeddings to capture.
-- knowledge_base_ids (optional): limit the search scope.
+## 参数
+- queries（必填）：1–5 个语义问题 / 概念短句。
+- knowledge_base_ids（可选）：限定检索到指定知识库（KB 粒度）。若上游已通过 select_documents
+  选出候选文档，请把这些文档所属的 KB ID 传进来收敛范围。
+- tag_paths（可选）：精确层级标签路径（例如 ['/a/b']），仅命中所选节点，不含子孙。
+- tag_path_prefixes（可选）：层级标签路径前缀（例如 ['/a/']），命中节点及其所有子孙。
 
-## Output
-Returns chunks ranked by semantic similarity, reranked when applicable.  
-Results represent conceptual relevance, not literal keyword overlap.`,
+## 输出
+按语义相似度排序的 chunk 列表（必要时经过 rerank）。返回的是**分片正文**，不是文档元信息。`,
 	schema: json.RawMessage(`{
   "type": "object",
   "properties": {
     "queries": {
       "type": "array",
-      "description": "REQUIRED: 1-5 semantic questions/topics (e.g., ['What is RAG?', 'RAG benefits'])",
+      "description": "【必填】1-5 条精炼的语义问题或概念短句（例如 ['RAG 的核心思想是什么','向量检索与 BM25 的差异']）。不要粘用户原话或关键词列表。若诉求是『列出哪些文档』请改用 select_documents。",
       "items": {
         "type": "string"
       },
@@ -90,12 +91,30 @@ Results represent conceptual relevance, not literal keyword overlap.`,
     },
     "knowledge_base_ids": {
       "type": "array",
-      "description": "Optional: KB IDs to search",
+      "description": "可选：限定检索到这些知识库 ID（KB 粒度）。",
       "items": {
         "type": "string"
       },
       "minItems": 0,
       "maxItems": 10
+    },
+    "tag_paths": {
+      "type": "array",
+      "description": "可选：精确层级标签路径（例如 ['/a/b']），仅命中所选节点，不含子孙。",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 0,
+      "maxItems": 20
+    },
+    "tag_path_prefixes": {
+      "type": "array",
+      "description": "可选：层级标签路径前缀（例如 ['/a/']），命中节点及其所有子孙。",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 0,
+      "maxItems": 20
     }
   },
   "required": ["queries"]
@@ -106,6 +125,9 @@ Results represent conceptual relevance, not literal keyword overlap.`,
 type KnowledgeSearchInput struct {
 	Queries          []string `json:"queries"`
 	KnowledgeBaseIDs []string `json:"knowledge_base_ids,omitempty"`
+	// TagIDs 过滤列表：传任意层级的 id_knowledge_tag 都能命中
+	// （Milvus 侧 ARRAY_CONTAINS_ANY(tag_id, [...])）。
+	TagIDs []string `json:"tag_ids,omitempty"`
 }
 
 // searchResultWithMeta wraps search result with metadata about which query matched it
@@ -281,7 +303,8 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 	kbTypeMap := t.getKnowledgeBaseTypes(ctx, kbIDs)
 
 	allResults := t.concurrentSearchByTargets(ctx, queries, searchTargets,
-		topK, vectorThreshold, keywordThreshold, kbTypeMap)
+		topK, vectorThreshold, keywordThreshold, kbTypeMap,
+		input.TagIDs)
 	logger.Infof(ctx, "[Tool][KnowledgeSearch] Concurrent search completed: %d raw results", len(allResults))
 
 	// Note: HybridSearch now uses RRF (Reciprocal Rank Fusion) which produces normalized scores
@@ -441,6 +464,7 @@ func (t *KnowledgeSearchTool) concurrentSearchByTargets(
 	topK int,
 	vectorThreshold, keywordThreshold float64,
 	kbTypeMap map[string]string,
+	tagIDs []string,
 ) []*searchResultWithMeta {
 	// Batch-fetch KB records for embedding model grouping
 	kbIDs := searchTargets.GetAllKnowledgeBaseIDs()
@@ -505,6 +529,7 @@ func (t *KnowledgeSearchTool) concurrentSearchByTargets(
 							MatchCount:       topK,
 							VectorThreshold:  vectorThreshold,
 							KeywordThreshold: keywordThreshold,
+							TagIDs:           tagIDs,
 						}
 						kbResults, err := t.knowledgeBaseService.HybridSearch(ctx, fullKBIDs[0], searchParams)
 						if err != nil {
@@ -538,6 +563,7 @@ func (t *KnowledgeSearchTool) concurrentSearchByTargets(
 							VectorThreshold:  vectorThreshold,
 							KeywordThreshold: keywordThreshold,
 							KnowledgeIDs:     st.KnowledgeIDs,
+							TagIDs:           tagIDs,
 						}
 						kbResults, err := t.knowledgeBaseService.HybridSearch(ctx, st.KnowledgeBaseID, searchParams)
 						if err != nil {
@@ -1142,7 +1168,7 @@ func (t *KnowledgeSearchTool) formatOutput(
 					knowledgeTotalMap[result.KnowledgeID] = 0
 				} else {
 					_, total, err := t.chunkService.GetRepository().ListPagedChunksByKnowledgeID(ctx,
-						effectiveTenantID, result.KnowledgeID,
+						result.KnowledgeID,
 						&types.Pagination{Page: 1, PageSize: 1},
 						[]types.ChunkType{types.ChunkTypeText}, "", "", "", "", "",
 					)

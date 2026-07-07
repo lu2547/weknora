@@ -29,7 +29,7 @@ export function useStream() {
   let renderTimer: number | null = null
 
   // 启动流式请求
-  const startStream = async (params: { session_id: any; query: any; knowledge_base_ids?: string[]; knowledge_ids?: string[]; agent_enabled?: boolean; agent_id?: string; web_search_enabled?: boolean; enable_memory?: boolean; summary_model_id?: string; mcp_service_ids?: string[]; mentioned_items?: Array<{id: string; name: string; type: string; kb_type?: string}>; images?: Array<{data: string}>; method: string; url: string }) => {
+  const startStream = async (params: { session_id: any; query: any; knowledge_base_ids?: string[]; knowledge_ids?: string[]; agent_enabled?: boolean; agent_id?: string; web_search_enabled?: boolean; enable_memory?: boolean; summary_model_id?: string; mcp_service_ids?: string[]; mentioned_items?: Array<{ id: string; name: string; type: string; kb_type?: string }>; images?: Array<{ data: string }>; method: string; url: string }) => {
     // 重置状态
     output.value = '';
     error.value = null;
@@ -37,8 +37,9 @@ export function useStream() {
     isLoading.value = true;
 
     // 获取API配置
-    const apiUrl = import.meta.env.VITE_IS_DOCKER ? "" : "http://localhost:8080";
-    
+    // 开发环境下使用相对路径，由 Vite 代理转发到后端（见 vite.config.ts）
+    const apiUrl = "";
+
     // 获取JWT Token
     const token = localStorage.getItem('weknora_token');
     if (!token) {
@@ -75,10 +76,10 @@ export function useStream() {
         params.method == "POST"
           ? `${apiUrl}${params.url}/${params.session_id}`
           : `${apiUrl}${params.url}/${params.session_id}?message_id=${params.query}`;
-      
+
       // Prepare POST body with required fields for agent-chat
       // knowledge_base_ids array and agent_enabled can update Session's SessionAgentConfig
-      const postBody: any = { 
+      const postBody: any = {
         query: params.query,
         agent_enabled: params.agent_enabled !== undefined ? params.agent_enabled : true
       };
@@ -119,7 +120,7 @@ export function useStream() {
         postBody.images = params.images;
       }
       postBody.channel = "web";
-      
+
       await fetchEventSource(url, {
         method: params.method,
         headers: {

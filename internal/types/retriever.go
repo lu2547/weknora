@@ -35,7 +35,7 @@ type RetrieveParams struct {
 	KnowledgeBaseIDs []string
 	// Knowledge IDs
 	KnowledgeIDs []string
-	// Tag IDs for filtering (used for FAQ priority filtering)
+	// TagIDs 过滤列表：传任意层级的 id_knowledge_tag 都能命中（Milvus 侧 ARRAY_CONTAINS_ANY）
 	TagIDs []string
 	// Excluded knowledge IDs
 	ExcludeKnowledgeIDs []string
@@ -51,6 +51,13 @@ type RetrieveParams struct {
 	AdditionalParams map[string]interface{}
 	// Retriever type
 	RetrieverType RetrieverType // Retriever type
+
+	// KnowledgeBases is an optional snapshot of the KBs participating in this
+	// retrieve call. Engines that need per-KB metadata (e.g., Milvus's
+	// CollectionResolver, which routes by KB.Category and KB.CreatedAt) MUST
+	// rely on this field rather than on KnowledgeBaseIDs alone. Engines that
+	// don't care can ignore it.
+	KnowledgeBases []*KnowledgeBase
 }
 
 // RetrieverEngineParams represents the parameters for retriever engine
@@ -77,8 +84,8 @@ type IndexWithScore struct {
 	KnowledgeID string
 	// Knowledge base ID
 	KnowledgeBaseID string
-	// Tag ID
-	TagID string
+	// TagIDs 包含该 chunk 关联标签 + 全部祖先 id_knowledge_tag（祖先链平铺）
+	TagIDs []string
 	// Score
 	Score float64
 	// Match type

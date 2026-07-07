@@ -40,7 +40,7 @@ func NewDuplicateFileError(knowledge *Knowledge) *DuplicateKnowledgeError {
 // NewDuplicateURLError creates a duplicate URL error
 func NewDuplicateURLError(knowledge *Knowledge) *DuplicateKnowledgeError {
 	return &DuplicateKnowledgeError{
-		Message:   fmt.Sprintf("URL already exists: %s", knowledge.Source),
+		Message:   fmt.Sprintf("URL already exists: %s", knowledge.FileName),
 		Knowledge: knowledge,
 	}
 }

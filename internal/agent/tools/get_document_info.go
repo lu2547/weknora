@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -46,7 +47,7 @@ Do not use when:
 
 // GetDocumentInfoInput defines the input parameters for get document info tool
 type GetDocumentInfoInput struct {
-	KnowledgeIDs []string `json:"knowledge_ids" jsonschema:"Array of document/knowledge IDs, obtained from knowledge_id field in search results, supports concurrent batch queries"`
+	KnowledgeIDs []string `json:"knowledge_ids" jsonschema:"REQUIRED JSON array of document/knowledge ID strings (e.g. [\"abc\",\"def\"]), NOT a single string. Even when querying only one document you MUST wrap the id in an array: [\"abc\"]. Obtain ids from the knowledge_id field returned by search/select tools."`
 }
 
 // GetDocumentInfoTool retrieves detailed information about a document/knowledge
@@ -73,13 +74,19 @@ func NewGetDocumentInfoTool(
 
 // Execute retrieves document information with concurrent processing
 func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage) (*types.ToolResult, error) {
-	// Parse args from json.RawMessage
+	// 先按实际期望的结构解析。如果失败，尝试容错：
+	// LLM 偶尔会把 knowledge_ids 当成单个字符串或逗号分隔的字符串传进来，
+	// 这里把它规范化成 []string，避免单次 tool call 直接作废。
 	var input GetDocumentInfoInput
 	if err := json.Unmarshal(args, &input); err != nil {
-		return &types.ToolResult{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to parse args: %v", err),
-		}, err
+		normalized, nerr := normalizeGetDocumentInfoArgs(args)
+		if nerr != nil {
+			return &types.ToolResult{
+				Success: false,
+				Error:   fmt.Sprintf("Failed to parse args: %v", err),
+			}, err
+		}
+		input = normalized
 	}
 
 	// Extract knowledge_ids array
@@ -129,9 +136,9 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 				return
 			}
 
-			// Use knowledge's actual tenant_id for chunk query (supports cross-tenant shared KB)
+			// Get chunk count for this knowledge
 			_, total, err := t.chunkService.GetRepository().
-				ListPagedChunksByKnowledgeID(ctx, knowledge.TenantID, id, &types.Pagination{
+				ListPagedChunksByKnowledgeID(ctx, id, &types.Pagination{
 					Page:     1,
 					PageSize: 1,
 				}, []types.ChunkType{"text"}, "", "", "", "", "")
@@ -200,7 +207,7 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 			output += fmt.Sprintf("  Description:  %s\n", k.Description)
 		}
 
-		output += fmt.Sprintf("  Source:       %s\n", formatSource(k.Type, k.Source))
+		output += fmt.Sprintf("  Type:         %s\n", k.Type)
 
 		if k.FileName != "" {
 			output += fmt.Sprintf("  File Name:    %s\n", k.FileName)
@@ -211,15 +218,6 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 		output += fmt.Sprintf("  Parse Status: %s\n", formatParseStatus(k.ParseStatus))
 		output += fmt.Sprintf("  Chunk Count:  %d\n", doc.chunkCount)
 
-		if k.Metadata != nil {
-			if metadata, err := k.Metadata.Map(); err == nil && len(metadata) > 0 {
-				output += "  Metadata:\n"
-				for key, value := range metadata {
-					output += fmt.Sprintf("    - %s: %v\n", key, value)
-				}
-			}
-		}
-
 		output += "\n"
 
 		formattedDocs = append(formattedDocs, map[string]interface{}{
@@ -227,13 +225,11 @@ func (t *GetDocumentInfoTool) Execute(ctx context.Context, args json.RawMessage)
 			"title":        k.Title,
 			"description":  k.Description,
 			"type":         k.Type,
-			"source":       k.Source,
 			"file_name":    k.FileName,
 			"file_type":    k.FileType,
 			"file_size":    k.FileSize,
 			"parse_status": k.ParseStatus,
 			"chunk_count":  doc.chunkCount,
-			"metadata":     k.GetMetadata(),
 		})
 	}
 
@@ -299,4 +295,41 @@ func formatParseStatus(status string) string {
 	default:
 		return status
 	}
+}
+
+// normalizeGetDocumentInfoArgs 容错地解析 get_document_info 的入参。
+// 主要处理 LLM 把 knowledge_ids 传成单个字符串（或逗号分隔字符串）的情况，
+// 把它规范化成 []string。用于严格结构解析失败时的降级通道。
+func normalizeGetDocumentInfoArgs(args json.RawMessage) (GetDocumentInfoInput, error) {
+	var input GetDocumentInfoInput
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(args, &raw); err != nil {
+		return input, err
+	}
+	idsRaw, ok := raw["knowledge_ids"]
+	if !ok {
+		return input, fmt.Errorf("knowledge_ids is required")
+	}
+
+	// 先试标准数组
+	var ids []string
+	if err := json.Unmarshal(idsRaw, &ids); err == nil {
+		input.KnowledgeIDs = ids
+		return input, nil
+	}
+
+	// 再试单个字符串
+	var single string
+	if err := json.Unmarshal(idsRaw, &single); err != nil {
+		return input, fmt.Errorf("knowledge_ids must be array of strings or a single string")
+	}
+	// 允许逗号分隔的字符串，拆成数组。
+	parts := strings.Split(single, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			input.KnowledgeIDs = append(input.KnowledgeIDs, p)
+		}
+	}
+	return input, nil
 }

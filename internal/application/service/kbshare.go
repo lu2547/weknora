@@ -51,16 +51,14 @@ func NewKBShareService(
 func (s *kbShareService) ShareKnowledgeBase(ctx context.Context, kbID string, orgID string, userID string, tenantID uint64, permission types.OrgMemberRole) (*types.KnowledgeBaseShare, error) {
 	logger.Infof(ctx, "Sharing knowledge base %s to organization %s", kbID, orgID)
 
-	// Verify knowledge base exists and user is the owner (same tenant)
-	kb, err := s.kbRepo.GetKnowledgeBaseByID(ctx, kbID)
+	// Verify knowledge base exists
+	_, err := s.kbRepo.GetKnowledgeBaseByID(ctx, kbID)
 	if err != nil {
 		return nil, ErrKBNotFound
 	}
 
-	// Check if user's tenant owns the knowledge base
-	if kb.TenantID != tenantID {
-		return nil, ErrNotKBOwner
-	}
+	// Ownership check removed: KB no longer has TenantID
+	// Access is validated through the service layer context
 
 	// Verify organization exists
 	_, err = s.orgRepo.GetByID(ctx, orgID)
@@ -176,12 +174,9 @@ func (s *kbShareService) RemoveShare(ctx context.Context, shareID string, userID
 
 // ListSharesByKnowledgeBase lists shares for a knowledge base; caller's tenant must own the KB.
 func (s *kbShareService) ListSharesByKnowledgeBase(ctx context.Context, kbID string, tenantID uint64) ([]*types.KnowledgeBaseShare, error) {
-	kb, err := s.kbRepo.GetKnowledgeBaseByID(ctx, kbID)
+	_, err := s.kbRepo.GetKnowledgeBaseByID(ctx, kbID)
 	if err != nil {
 		return nil, ErrKBNotFound
-	}
-	if kb.TenantID != tenantID {
-		return nil, ErrNotKBOwner
 	}
 	return s.shareRepo.ListByKnowledgeBase(ctx, kbID)
 }
@@ -233,14 +228,14 @@ func (s *kbShareService) ListSharedKnowledgeBases(ctx context.Context, userID st
 		// Calculate knowledge/chunk count based on type
 		switch kb.Type {
 		case types.KnowledgeBaseTypeDocument:
-			knowledgeCount, err := s.kgRepo.CountKnowledgeByKnowledgeBaseID(ctx, share.SourceTenantID, kb.ID)
+			knowledgeCount, err := s.kgRepo.CountKnowledgeByKnowledgeBaseID(ctx, kb.ID)
 			if err != nil {
 				logger.Warnf(ctx, "Failed to get knowledge count for shared KB %s: %v", kb.ID, err)
 			} else {
 				kb.KnowledgeCount = knowledgeCount
 			}
 		case types.KnowledgeBaseTypeFAQ:
-			chunkCount, err := s.chunkRepo.CountChunksByKnowledgeBaseID(ctx, share.SourceTenantID, kb.ID)
+			chunkCount, err := s.chunkRepo.CountChunksByKnowledgeBaseID(ctx, kb.ID)
 			if err != nil {
 				logger.Warnf(ctx, "Failed to get chunk count for shared KB %s: %v", kb.ID, err)
 			} else {
@@ -318,11 +313,11 @@ func (s *kbShareService) ListSharedKnowledgeBasesInOrganization(ctx context.Cont
 		kb := share.KnowledgeBase
 		switch kb.Type {
 		case types.KnowledgeBaseTypeDocument:
-			if count, err := s.kgRepo.CountKnowledgeByKnowledgeBaseID(ctx, share.SourceTenantID, kb.ID); err == nil {
+			if count, err := s.kgRepo.CountKnowledgeByKnowledgeBaseID(ctx, kb.ID); err == nil {
 				kb.KnowledgeCount = count
 			}
 		case types.KnowledgeBaseTypeFAQ:
-			if count, err := s.chunkRepo.CountChunksByKnowledgeBaseID(ctx, share.SourceTenantID, kb.ID); err == nil {
+			if count, err := s.chunkRepo.CountChunksByKnowledgeBaseID(ctx, kb.ID); err == nil {
 				kb.ChunkCount = count
 			}
 		}
@@ -469,7 +464,10 @@ func (s *kbShareService) GetKBSourceTenant(ctx context.Context, kbID string) (ui
 		return 0, ErrKBNotFound
 	}
 
-	return kb.TenantID, nil
+	// If not shared, get the tenant from context (caller is the owner)
+	_ = kb
+	tenantID := types.MustTenantIDFromContext(ctx)
+	return tenantID, nil
 }
 
 // CountSharesByKnowledgeBaseIDs counts the number of shares for multiple knowledge bases

@@ -88,10 +88,8 @@ func NewInitializationHandler(
 
 // KBModelConfigRequest 知识库模型配置请求（简化版，只传模型ID）
 type KBModelConfigRequest struct {
-	LLMModelID       string           `json:"llmModelId"       binding:"required"`
-	EmbeddingModelID string           `json:"embeddingModelId" binding:"required"`
-	VLMConfig        *types.VLMConfig `json:"vlm_config"`
-	ASRConfig        *types.ASRConfig `json:"asr_config"`
+	LLMModelID       string `json:"llmModelId"       binding:"required"`
+	EmbeddingModelID string `json:"embeddingModelId" binding:"required"`
 
 	// 文档分块配置
 	DocumentSplitting struct {
@@ -235,20 +233,7 @@ func (h *InitializationHandler) UpdateKBConfig(c *gin.Context) {
 		return
 	}
 
-	// 检查Embedding模型是否可以修改
-	if kb.EmbeddingModelID != "" && kb.EmbeddingModelID != req.EmbeddingModelID {
-		// 检查是否已有文件
-		knowledgeList, err := h.knowledgeService.ListPagedKnowledgeByKnowledgeBaseID(ctx,
-			kbIdStr, &types.Pagination{
-				Page:     1,
-				PageSize: 1,
-			}, "", "", "")
-		if err == nil && knowledgeList != nil && knowledgeList.Total > 0 {
-			logger.Error(ctx, "Cannot change embedding model when files exist")
-			c.Error(errors.NewBadRequestError("知识库中已有文件，无法修改Embedding模型"))
-			return
-		}
-	}
+	// EmbeddingModelID removed from KB (system-level default)
 
 	// 从数据库获取模型详情并验证
 	llmModel, err := h.modelService.GetModelByID(ctx, req.LLMModelID)
@@ -265,37 +250,8 @@ func (h *InitializationHandler) UpdateKBConfig(c *gin.Context) {
 		return
 	}
 
-	// 更新知识库的模型ID
-	kb.SummaryModelID = req.LLMModelID
-	kb.EmbeddingModelID = req.EmbeddingModelID
-
-	// 处理多模态模型配置
-	kb.VLMConfig = types.VLMConfig{}
-	if req.VLMConfig != nil && req.Multimodal.Enabled && req.VLMConfig.ModelID != "" {
-		vllmModel, err := h.modelService.GetModelByID(ctx, req.VLMConfig.ModelID)
-		if err != nil || vllmModel == nil {
-			logger.Warn(ctx, "VLM model not found")
-		} else {
-			kb.VLMConfig.Enabled = req.VLMConfig.Enabled
-			kb.VLMConfig.ModelID = req.VLMConfig.ModelID
-		}
-	}
-	if !kb.VLMConfig.Enabled {
-		kb.VLMConfig.ModelID = ""
-	}
-
-	// 处理ASR语音识别配置
-	kb.ASRConfig = types.ASRConfig{}
-	if req.ASRConfig != nil && req.ASRConfig.Enabled && req.ASRConfig.ModelID != "" {
-		asrModel, err := h.modelService.GetModelByID(ctx, req.ASRConfig.ModelID)
-		if err != nil || asrModel == nil {
-			logger.Warn(ctx, "ASR model not found")
-		} else {
-			kb.ASRConfig.Enabled = true
-			kb.ASRConfig.ModelID = req.ASRConfig.ModelID
-			kb.ASRConfig.Language = req.ASRConfig.Language
-		}
-	}
+	// Model IDs are now system-level defaults, no longer per-KB
+	// kb.SummaryModelID and kb.EmbeddingModelID have been removed
 
 	// 更新文档分块配置
 	if req.DocumentSplitting.ChunkSize > 0 {
@@ -316,58 +272,7 @@ func (h *InitializationHandler) UpdateKBConfig(c *gin.Context) {
 		kb.ChunkingConfig.ChildChunkSize = req.DocumentSplitting.ChildChunkSize
 	}
 
-	// 更新多模态配置
-	if req.Multimodal.Enabled {
-		// VLM model already set above
-	} else {
-		kb.VLMConfig.ModelID = ""
-	}
-
-	// 存储引擎：仅写入 provider 到新字段，参数从租户全局 StorageEngineConfig 读取
-	provider := strings.ToLower(strings.TrimSpace(req.StorageProvider))
-	if provider == "" {
-		provider = "local"
-	}
-	oldProvider := kb.GetStorageProvider()
-	if oldProvider == "" {
-		oldProvider = "local"
-	}
-	if oldProvider != provider {
-		knowledgeList, err := h.knowledgeService.ListPagedKnowledgeByKnowledgeBaseID(ctx,
-			kbIdStr, &types.Pagination{Page: 1, PageSize: 1}, "", "", "")
-		if err == nil && knowledgeList != nil && knowledgeList.Total > 0 {
-			logger.Warn(ctx, "Storage engine changed with existing files, old files may become inaccessible")
-		}
-	}
-	kb.SetStorageProvider(provider)
-
-	// 更新知识图谱配置
-	if req.NodeExtract.Enabled {
-		// 转换 Nodes 和 Relations 为指针类型
-		nodes := make([]*types.GraphNode, len(req.NodeExtract.Nodes))
-		for i := range req.NodeExtract.Nodes {
-			nodes[i] = &req.NodeExtract.Nodes[i]
-		}
-		relations := make([]*types.GraphRelation, len(req.NodeExtract.Relations))
-		for i := range req.NodeExtract.Relations {
-			relations[i] = &req.NodeExtract.Relations[i]
-		}
-
-		kb.ExtractConfig = &types.ExtractConfig{
-			Enabled:   req.NodeExtract.Enabled,
-			Text:      req.NodeExtract.Text,
-			Tags:      req.NodeExtract.Tags,
-			Nodes:     nodes,
-			Relations: relations,
-		}
-	} else {
-		kb.ExtractConfig = &types.ExtractConfig{Enabled: false}
-	}
-	if err := validateExtractConfig(kb.ExtractConfig); err != nil {
-		logger.Error(ctx, "Invalid extract configuration", err)
-		c.Error(err)
-		return
-	}
+	// Multimodal, storage, and extract configs removed from KB (now system-level)
 
 	// 更新问题生成配置
 	if req.QuestionGeneration.Enabled {
@@ -723,16 +628,8 @@ func (descriptor modelDescriptor) toModel() *types.Model {
 }
 
 func (h *InitializationHandler) findExistingModelID(kb *types.KnowledgeBase, modelType types.ModelType) string {
-	switch modelType {
-	case types.ModelTypeEmbedding:
-		return kb.EmbeddingModelID
-	case types.ModelTypeKnowledgeQA:
-		return kb.SummaryModelID
-	case types.ModelTypeVLLM:
-		return kb.VLMConfig.ModelID
-	default:
-		return ""
-	}
+	// Model IDs removed from KB - return empty (system uses defaults)
+	return ""
 }
 
 func (h *InitializationHandler) applyKnowledgeBaseInitialization(
@@ -740,77 +637,12 @@ func (h *InitializationHandler) applyKnowledgeBaseInitialization(
 	req *InitializationRequest,
 	processedModels []*types.Model,
 ) {
-	embeddingModelID, llmModelID, vlmModelID := extractModelIDs(processedModels)
-
-	kb.SummaryModelID = llmModelID
-	kb.EmbeddingModelID = embeddingModelID
-
+	// Model IDs, VLMConfig, StorageConfig, ExtractConfig removed from KB
+	// Only apply chunking config
 	kb.ChunkingConfig = types.ChunkingConfig{
 		ChunkSize:    req.DocumentSplitting.ChunkSize,
 		ChunkOverlap: req.DocumentSplitting.ChunkOverlap,
 		Separators:   req.DocumentSplitting.Separators,
-	}
-
-	if req.Multimodal.Enabled {
-		kb.VLMConfig = types.VLMConfig{
-			Enabled: req.Multimodal.Enabled,
-			ModelID: vlmModelID,
-		}
-		switch req.Multimodal.StorageType {
-		case "cos":
-			if req.Multimodal.COS != nil {
-				kb.SetStorageProvider("cos")
-				// Legacy: also write to cos_config for backward compat with old code paths
-				kb.StorageConfig = types.StorageConfig{
-					Provider:   req.Multimodal.StorageType,
-					BucketName: req.Multimodal.COS.BucketName,
-					AppID:      req.Multimodal.COS.AppID,
-					PathPrefix: req.Multimodal.COS.PathPrefix,
-					SecretID:   req.Multimodal.COS.SecretID,
-					SecretKey:  req.Multimodal.COS.SecretKey,
-					Region:     req.Multimodal.COS.Region,
-				}
-			}
-		case "minio":
-			if req.Multimodal.Minio != nil {
-				kb.SetStorageProvider("minio")
-				// Legacy: also write to cos_config for backward compat with old code paths
-				kb.StorageConfig = types.StorageConfig{
-					Provider:   req.Multimodal.StorageType,
-					BucketName: req.Multimodal.Minio.BucketName,
-					PathPrefix: req.Multimodal.Minio.PathPrefix,
-					SecretID:   os.Getenv("MINIO_ACCESS_KEY_ID"),
-					SecretKey:  os.Getenv("MINIO_SECRET_ACCESS_KEY"),
-				}
-			}
-		}
-	} else {
-		kb.VLMConfig = types.VLMConfig{}
-		kb.SetStorageProvider("")
-		kb.StorageConfig = types.StorageConfig{}
-	}
-
-	if req.NodeExtract.Enabled {
-		kb.ExtractConfig = &types.ExtractConfig{
-			Text:      req.NodeExtract.Text,
-			Tags:      req.NodeExtract.Tags,
-			Nodes:     make([]*types.GraphNode, 0),
-			Relations: make([]*types.GraphRelation, 0),
-		}
-		for _, rnode := range req.NodeExtract.Nodes {
-			node := &types.GraphNode{
-				Name:       rnode.Name,
-				Attributes: rnode.Attributes,
-			}
-			kb.ExtractConfig.Nodes = append(kb.ExtractConfig.Nodes, node)
-		}
-		for _, relation := range req.NodeExtract.Relations {
-			kb.ExtractConfig.Relations = append(kb.ExtractConfig.Relations, &types.GraphRelation{
-				Node1: relation.Node1,
-				Node2: relation.Node2,
-				Type:  relation.Type,
-			})
-		}
 	}
 }
 
@@ -1285,13 +1117,9 @@ func (h *InitializationHandler) GetCurrentConfigByKB(c *gin.Context) {
 		return
 	}
 
-	// 根据知识库的模型ID获取特定模型
+	// Model IDs removed from KB; list default models instead
 	var models []*types.Model
-	modelIDs := []string{
-		kb.EmbeddingModelID,
-		kb.SummaryModelID,
-		kb.VLMConfig.ModelID,
-	}
+	modelIDs := []string{}
 
 	for _, modelID := range modelIDs {
 		if modelID != "" {
@@ -1386,17 +1214,11 @@ func (h *InitializationHandler) buildConfigResponse(ctx context.Context, models 
 		}
 	}
 
-	// 判断多模态是否启用：有VLM模型ID或有存储配置（兼容新旧字段）
-	storageProvider := kb.GetStorageProvider()
-	hasMultimodal := (kb.VLMConfig.IsEnabled() ||
-		kb.StorageConfig.SecretID != "" || kb.StorageConfig.BucketName != "" ||
-		(storageProvider != "" && storageProvider != "local"))
+	// Multimodal/storage config removed from KB
 	if config["multimodal"] == nil {
 		config["multimodal"] = map[string]interface{}{
-			"enabled": hasMultimodal,
+			"enabled": false,
 		}
-	} else {
-		config["multimodal"].(map[string]interface{})["enabled"] = hasMultimodal
 	}
 
 	// 如果没有Rerank模型，设置rerank为disabled
@@ -1417,47 +1239,12 @@ func (h *InitializationHandler) buildConfigResponse(ctx context.Context, models 
 			"separators":   kb.ChunkingConfig.Separators,
 		}
 
-		// 添加多模态的存储配置信息（优先读新字段，兼容旧 cos_config）
-		effectiveProvider := kb.GetStorageProvider()
-		if kb.StorageConfig.SecretID != "" || (effectiveProvider != "" && effectiveProvider != "local") {
-			if config["multimodal"] == nil {
-				config["multimodal"] = map[string]interface{}{
-					"enabled": true,
-				}
-			}
-			multimodal := config["multimodal"].(map[string]interface{})
-			multimodal["storageType"] = effectiveProvider
-			switch effectiveProvider {
-			case "cos":
-				multimodal["cos"] = map[string]interface{}{
-					"secretId":   kb.StorageConfig.SecretID,
-					"secretKey":  kb.StorageConfig.SecretKey,
-					"region":     kb.StorageConfig.Region,
-					"bucketName": kb.StorageConfig.BucketName,
-					"appId":      kb.StorageConfig.AppID,
-					"pathPrefix": kb.StorageConfig.PathPrefix,
-				}
-			case "minio":
-				multimodal["minio"] = map[string]interface{}{
-					"bucketName": kb.StorageConfig.BucketName,
-					"pathPrefix": kb.StorageConfig.PathPrefix,
-				}
-			}
-		}
+		// Storage config removed from KB
 	}
 
-	if kb.ExtractConfig != nil {
-		config["nodeExtract"] = map[string]interface{}{
-			"enabled":   kb.ExtractConfig.Enabled,
-			"text":      kb.ExtractConfig.Text,
-			"tags":      kb.ExtractConfig.Tags,
-			"nodes":     kb.ExtractConfig.Nodes,
-			"relations": kb.ExtractConfig.Relations,
-		}
-	} else {
-		config["nodeExtract"] = map[string]interface{}{
-			"enabled": false,
-		}
+	// ExtractConfig removed from KB
+	config["nodeExtract"] = map[string]interface{}{
+		"enabled": false,
 	}
 
 	return config

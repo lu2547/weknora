@@ -21,6 +21,7 @@ import (
 type knowledgeTagService struct {
 	kbService      interfaces.KnowledgeBaseService
 	repo           interfaces.KnowledgeTagRepository
+	shareRepo      interfaces.KnowledgeTagShareRepository
 	knowledgeRepo  interfaces.KnowledgeRepository
 	chunkRepo      interfaces.ChunkRepository
 	retrieveEngine interfaces.RetrieveEngineRegistry
@@ -33,6 +34,7 @@ type knowledgeTagService struct {
 func NewKnowledgeTagService(
 	kbService interfaces.KnowledgeBaseService,
 	repo interfaces.KnowledgeTagRepository,
+	shareRepo interfaces.KnowledgeTagShareRepository,
 	knowledgeRepo interfaces.KnowledgeRepository,
 	chunkRepo interfaces.ChunkRepository,
 	retrieveEngine interfaces.RetrieveEngineRegistry,
@@ -43,6 +45,7 @@ func NewKnowledgeTagService(
 	return &knowledgeTagService{
 		kbService:      kbService,
 		repo:           repo,
+		shareRepo:      shareRepo,
 		knowledgeRepo:  knowledgeRepo,
 		chunkRepo:      chunkRepo,
 		retrieveEngine: retrieveEngine,
@@ -66,33 +69,13 @@ func (s *knowledgeTagService) ListTags(
 		page = &types.Pagination{}
 	}
 	keyword = strings.TrimSpace(keyword)
+
 	// Ensure KB exists
-	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, kbID)
-	if err != nil {
+	if _, err := s.kbService.GetKnowledgeBaseByID(ctx, kbID); err != nil {
 		return nil, err
 	}
 
-	// Check access permission
-	tenantID := types.MustTenantIDFromContext(ctx)
-	if kb.TenantID != tenantID {
-		// Get user ID from context
-		userIDVal := ctx.Value(types.UserIDContextKey)
-		if userIDVal == nil {
-			return nil, werrors.NewForbiddenError("无权访问该知识库")
-		}
-		userID := userIDVal.(string)
-
-		// Check if user has at least viewer permission through organization sharing
-		hasPermission, err := s.kbShareService.HasKBPermission(ctx, kbID, userID, types.OrgRoleViewer)
-		if err != nil || !hasPermission {
-			return nil, werrors.NewForbiddenError("无权访问该知识库")
-		}
-	}
-
-	// Use kb's tenant ID for data access
-	effectiveTenantID := kb.TenantID
-
-	tags, total, err := s.repo.ListByKB(ctx, effectiveTenantID, kbID, page, keyword)
+	tags, total, err := s.repo.ListByKB(ctx, kbID, page, keyword)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +93,7 @@ func (s *knowledgeTagService) ListTags(
 	}
 
 	// Batch query all reference counts in 2 SQL queries instead of 2*N
-	countsMap, err := s.repo.BatchCountReferences(ctx, effectiveTenantID, kbID, tagIDs)
+	countsMap, err := s.repo.BatchCountReferences(ctx, kbID, tagIDs)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
 			"kb_id": kbID,
@@ -134,27 +117,39 @@ func (s *knowledgeTagService) ListTags(
 	return types.NewPageResult(total, page, results), nil
 }
 
-// CreateTag creates a new tag under a KB.
+// CreateTag creates a new tag under a KB. parentID may be empty to create a root-level tag.
 func (s *knowledgeTagService) CreateTag(
 	ctx context.Context,
 	kbID string,
+	parentID string,
 	name string,
-	color string,
-	sortOrder int,
+	sort int,
 ) (*types.KnowledgeTag, error) {
 	name = strings.TrimSpace(name)
 	if kbID == "" || name == "" {
 		return nil, werrors.NewBadRequestError("知识库ID和标签名称不能为空")
 	}
-	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, kbID)
-	if err != nil {
+	if !types.ValidateTagName(name) {
+		return nil, werrors.NewBadRequestError("标签名称不能包含路径分隔符 '" + types.TagPathSeparator + "'")
+	}
+	if _, err := s.kbService.GetKnowledgeBaseByID(ctx, kbID); err != nil {
 		return nil, err
 	}
 
-	// Check if tag with same name already exists
-	existingTag, err := s.repo.GetByName(ctx, kb.TenantID, kbID, name)
+	if parentID != "" {
+		parent, err := s.repo.GetByID(ctx, parentID)
+		if err != nil {
+			return nil, werrors.NewBadRequestError("父标签不存在")
+		}
+		if parent.KnowledgeBaseID != kbID {
+			return nil, werrors.NewBadRequestError("父标签不属于当前知识库")
+		}
+	}
+
+	// Sibling uniqueness check (same parent + name).
+	existingTag, err := s.repo.GetByName(ctx, kbID, parentID, name)
 	if err == nil && existingTag != nil {
-		return nil, werrors.NewConflictError("标签名称已存在")
+		return nil, werrors.NewConflictError("同级标签名称已存在")
 	}
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
@@ -163,15 +158,14 @@ func (s *knowledgeTagService) CreateTag(
 	now := time.Now()
 	// "未分类" tag should have the lowest sort order to appear first
 	if name == types.UntaggedTagName {
-		sortOrder = -1
+		sort = -1
 	}
 	tag := &types.KnowledgeTag{
 		ID:              uuid.New().String(),
-		TenantID:        kb.TenantID,
-		KnowledgeBaseID: kb.ID,
+		KnowledgeBaseID: kbID,
+		ParentID:        parentID,
 		Name:            name,
-		Color:           strings.TrimSpace(color),
-		SortOrder:       sortOrder,
+		Sort:            sort,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
@@ -181,41 +175,153 @@ func (s *knowledgeTagService) CreateTag(
 	return tag, nil
 }
 
-// UpdateTag updates tag basic information.
+// UpdateTag updates tag basic information (name and/or sort order).
 func (s *knowledgeTagService) UpdateTag(
 	ctx context.Context,
 	id string,
 	name *string,
-	color *string,
-	sortOrder *int,
+	sort *int,
 ) (*types.KnowledgeTag, error) {
 	if id == "" {
-		return nil, werrors.NewBadRequestError("标签ID不能为空")
+		return nil, werrors.NewBadRequestError("标签不能为空")
 	}
-	tenantID := types.MustTenantIDFromContext(ctx)
-	tag, err := s.repo.GetByID(ctx, tenantID, id)
+	tag, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 
 	if name != nil {
 		newName := strings.TrimSpace(*name)
-		if newName == "" {
-			return nil, werrors.NewBadRequestError("标签名称不能为空")
+		if !types.ValidateTagName(newName) {
+			return nil, werrors.NewBadRequestError("标签名称不能为空或包含路径分隔符")
+		}
+		if newName != tag.Name {
+			// Sibling uniqueness check under the same parent.
+			if existing, chkErr := s.repo.GetByName(ctx, tag.KnowledgeBaseID, tag.ParentID, newName); chkErr == nil && existing != nil && existing.ID != tag.ID {
+				return nil, werrors.NewConflictError("同级标签名称已存在")
+			} else if chkErr != nil && !errors.Is(chkErr, gorm.ErrRecordNotFound) {
+				return nil, chkErr
+			}
 		}
 		tag.Name = newName
 	}
-	if color != nil {
-		tag.Color = strings.TrimSpace(*color)
+	if sort != nil {
+		tag.Sort = *sort
 	}
-	if sortOrder != nil {
-		tag.SortOrder = *sortOrder
+	tag.UpdatedAt = time.Now()
+
+	if err := s.repo.Update(ctx, tag); err != nil {
+		return nil, err
 	}
+	return tag, nil
+}
+
+// MoveTag re-parents a tag to newParentID (empty means root).
+func (s *knowledgeTagService) MoveTag(
+	ctx context.Context,
+	id string,
+	newParentID string,
+) (*types.KnowledgeTag, error) {
+	if id == "" {
+		return nil, werrors.NewBadRequestError("标签不能为空")
+	}
+	tag, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if newParentID == tag.ID {
+		return nil, werrors.NewBadRequestError("不能将标签移到自己下")
+	}
+	if newParentID == tag.ParentID {
+		return tag, nil
+	}
+
+	if newParentID != "" {
+		parent, err := s.repo.GetByID(ctx, newParentID)
+		if err != nil {
+			return nil, werrors.NewBadRequestError("目标父标签不存在")
+		}
+		if parent.KnowledgeBaseID != tag.KnowledgeBaseID {
+			return nil, werrors.NewBadRequestError("不能跨知识库移动标签")
+		}
+	}
+
+	// Sibling uniqueness at the new location.
+	if existing, chkErr := s.repo.GetByName(ctx, tag.KnowledgeBaseID, newParentID, tag.Name); chkErr == nil && existing != nil && existing.ID != tag.ID {
+		return nil, werrors.NewConflictError("目标位置已存在同名标签")
+	} else if chkErr != nil && !errors.Is(chkErr, gorm.ErrRecordNotFound) {
+		return nil, chkErr
+	}
+
+	tag.ParentID = newParentID
 	tag.UpdatedAt = time.Now()
 	if err := s.repo.Update(ctx, tag); err != nil {
 		return nil, err
 	}
 	return tag, nil
+}
+
+// ListTagTree returns the full tag tree for a KB with per-node usage statistics.
+func (s *knowledgeTagService) ListTagTree(ctx context.Context, kbID string) ([]*types.KnowledgeTagTreeNode, error) {
+	if kbID == "" {
+		return nil, werrors.NewBadRequestError("知识库ID不能为空")
+	}
+	if _, err := s.kbService.GetKnowledgeBaseByID(ctx, kbID); err != nil {
+		return nil, err
+	}
+
+	tags, err := s.repo.ListAllByKB(ctx, kbID)
+	if err != nil {
+		return nil, err
+	}
+	if len(tags) == 0 {
+		return []*types.KnowledgeTagTreeNode{}, nil
+	}
+
+	tagIDs := make([]string, 0, len(tags))
+	for _, t := range tags {
+		if t != nil {
+			tagIDs = append(tagIDs, t.ID)
+		}
+	}
+	countsMap, err := s.repo.BatchCountReferences(ctx, kbID, tagIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build parent -> children index.
+	nodeByID := make(map[string]*types.KnowledgeTagTreeNode, len(tags))
+	for _, t := range tags {
+		if t == nil {
+			continue
+		}
+		counts := countsMap[t.ID]
+		nodeByID[t.ID] = &types.KnowledgeTagTreeNode{
+			KnowledgeTagWithStats: types.KnowledgeTagWithStats{
+				KnowledgeTag:   *t,
+				KnowledgeCount: counts.KnowledgeCount,
+				ChunkCount:     counts.ChunkCount,
+			},
+		}
+	}
+	roots := make([]*types.KnowledgeTagTreeNode, 0)
+	for _, t := range tags {
+		if t == nil {
+			continue
+		}
+		node := nodeByID[t.ID]
+		if t.ParentID == "" {
+			roots = append(roots, node)
+			continue
+		}
+		if parent, ok := nodeByID[t.ParentID]; ok {
+			parent.Children = append(parent.Children, node)
+		} else {
+			// Orphan (parent missing): surface as root to avoid data loss.
+			roots = append(roots, node)
+		}
+	}
+	return roots, nil
 }
 
 // DeleteTag deletes a tag. When force=true, also deletes all chunks under this tag.
@@ -225,30 +331,30 @@ func (s *knowledgeTagService) DeleteTag(ctx context.Context, id string, force bo
 	if id == "" {
 		return werrors.NewBadRequestError("标签ID不能为空")
 	}
-	tenantID := types.MustTenantIDFromContext(ctx)
-	tag, err := s.repo.GetByID(ctx, tenantID, id)
+	tag, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return err
 	}
 
-	// Get KB info for embedding model
+	// Get KB info
 	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, tag.KnowledgeBaseID)
 	if err != nil {
 		return err
 	}
 
-	kCount, cCount, err := s.repo.CountReferences(ctx, tenantID, tag.KnowledgeBaseID, tag.ID)
+	kCount, cCount, err := s.repo.CountReferences(ctx, tag.KnowledgeBaseID, tag.ID)
 	if err != nil {
 		return err
 	}
 
 	// Get tenant info for effective engines
 	tenantInfo, _ := types.TenantInfoFromContext(ctx)
+	tenantID := types.MustTenantIDFromContext(ctx)
 
 	// Helper function to delete chunks and enqueue index deletion task
 	deleteChunksAndEnqueueIndexDelete := func() error {
 		// Delete chunks and get their IDs
-		deletedIDs, err := s.chunkRepo.DeleteChunksByTagID(ctx, tenantID, tag.KnowledgeBaseID, tag.ID, excludeIDs)
+		deletedIDs, err := s.chunkRepo.DeleteChunksByTagID(ctx, tag.KnowledgeBaseID, tag.ID, excludeIDs)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to delete chunks by tag ID %s: %v", tag.ID, err)
 			return werrors.NewInternalServerError("删除标签下的数据失败")
@@ -256,7 +362,8 @@ func (s *knowledgeTagService) DeleteTag(ctx context.Context, id string, force bo
 
 		// Enqueue async index deletion task for the deleted chunks
 		if len(deletedIDs) > 0 {
-			s.enqueueIndexDeleteTask(ctx, tenantID, kb.ID, kb.EmbeddingModelID, string(kb.Type), deletedIDs, tenantInfo.GetEffectiveEngines())
+			embeddingModelID := s.getDefaultEmbeddingModelID(ctx)
+			s.enqueueIndexDeleteTask(ctx, tenantID, kb.ID, embeddingModelID, string(kb.Type), deletedIDs, tenantInfo.GetEffectiveEngines())
 		}
 
 		logger.Infof(ctx, "Deleted %d chunks under tag %s", len(deletedIDs), tag.ID)
@@ -269,7 +376,7 @@ func (s *knowledgeTagService) DeleteTag(ctx context.Context, id string, force bo
 			return nil
 		}
 		// Get all knowledge IDs under this tag
-		knowledgeIDs, err := s.knowledgeRepo.ListIDsByTagID(ctx, tenantID, kb.ID, tag.ID)
+		knowledgeIDs, err := s.knowledgeRepo.ListIDsByTagID(ctx, kb.ID, tag.ID)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to list knowledge IDs by tag ID %s: %v", tag.ID, err)
 			return werrors.NewInternalServerError("获取标签下的文档失败")
@@ -299,13 +406,11 @@ func (s *knowledgeTagService) DeleteTag(ctx context.Context, id string, force bo
 
 	// contentOnly mode: only delete content, keep the tag
 	if contentOnly {
-		// For document-type KB, delete knowledge files first (which will also delete chunks)
 		if kb.Type == types.KnowledgeBaseTypeDocument && kCount > 0 {
 			if err := enqueueKnowledgeDeleteTask(); err != nil {
 				return err
 			}
 		} else if cCount > 0 {
-			// For FAQ-type KB, only delete chunks
 			if err := deleteChunksAndEnqueueIndexDelete(); err != nil {
 				return err
 			}
@@ -319,13 +424,11 @@ func (s *knowledgeTagService) DeleteTag(ctx context.Context, id string, force bo
 
 	// When force=true, delete all content under this tag first
 	if force {
-		// For document-type KB, delete knowledge files first (which will also delete chunks)
 		if kb.Type == types.KnowledgeBaseTypeDocument && kCount > 0 {
 			if err := enqueueKnowledgeDeleteTask(); err != nil {
 				return err
 			}
 		} else if cCount > 0 {
-			// For FAQ-type KB, only delete chunks
 			if err := deleteChunksAndEnqueueIndexDelete(); err != nil {
 				return err
 			}
@@ -336,7 +439,21 @@ func (s *knowledgeTagService) DeleteTag(ctx context.Context, id string, force bo
 	if len(excludeIDs) > 0 {
 		return nil
 	}
-	return s.repo.Delete(ctx, tenantID, id)
+	return s.repo.Delete(ctx, id)
+}
+
+// getDefaultEmbeddingModelID returns the system default embedding model ID.
+func (s *knowledgeTagService) getDefaultEmbeddingModelID(ctx context.Context) string {
+	models, err := s.modelService.ListModels(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, m := range models {
+		if m.Type == types.ModelTypeEmbedding && m.IsDefault {
+			return m.ID
+		}
+	}
+	return ""
 }
 
 // enqueueIndexDeleteTask enqueues an async task for index deletion (low priority)
@@ -405,7 +522,7 @@ func (s *knowledgeTagService) ProcessIndexDelete(ctx context.Context, t *asynq.T
 		}
 		batch := chunkIDs[i:end]
 
-		if err := retrieveEngine.DeleteByChunkIDList(ctx, batch, dimension, payload.KBType); err != nil {
+		if err := retrieveEngine.DeleteByChunkIDList(ctx, payload.KnowledgeBaseID, batch, dimension, payload.KBType); err != nil {
 			logger.Warnf(ctx, "Failed to delete indices for chunks batch [%d-%d]: %v", i, end, err)
 			return err
 		}
@@ -423,24 +540,162 @@ func (s *knowledgeTagService) FindOrCreateTagByName(ctx context.Context, kbID st
 		return nil, werrors.NewBadRequestError("知识库ID和标签名称不能为空")
 	}
 
-	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, kbID)
-	if err != nil {
+	if _, err := s.kbService.GetKnowledgeBaseByID(ctx, kbID); err != nil {
 		return nil, err
 	}
 
-	tenantID := kb.TenantID
-
-	// 先尝试查找现有标签
-	tag, err := s.repo.GetByName(ctx, tenantID, kbID, name)
+	// Try to find existing tag (root level)
+	tag, err := s.repo.GetByName(ctx, kbID, "", name)
 	if err == nil {
 		return tag, nil
 	}
 
-	// 如果不是 not found 错误，直接返回
+	// If not a "not found" error, return directly
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
 
-	// 创建新标签
-	return s.CreateTag(ctx, kbID, name, "", 0)
+	// Create new tag (root level)
+	return s.CreateTag(ctx, kbID, "", name, 0)
+}
+
+// validTagSharePermission returns true if the permission string is one of the
+// supported levels.
+func validTagSharePermission(p string) bool {
+	switch p {
+	case "viewer", "editor", "admin":
+		return true
+	}
+	return false
+}
+
+// ShareTag shares the given tag with a target group (e.g. organization).
+func (s *knowledgeTagService) ShareTag(
+	ctx context.Context,
+	tagID string,
+	groupKey string,
+	sharedByUserID string,
+	permission string,
+) (*types.KnowledgeTagShare, error) {
+	tagID = strings.TrimSpace(tagID)
+	groupKey = strings.TrimSpace(groupKey)
+	if tagID == "" || groupKey == "" {
+		return nil, werrors.NewBadRequestError("标签ID和目标组织ID不能为空")
+	}
+	permission = strings.TrimSpace(permission)
+	if permission == "" {
+		permission = "viewer"
+	}
+	if !validTagSharePermission(permission) {
+		return nil, werrors.NewBadRequestError("无效的权限级别")
+	}
+	if s.shareRepo == nil {
+		return nil, werrors.NewInternalServerError("标签共享未启用")
+	}
+
+	tag, err := s.repo.GetByID(ctx, tagID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, werrors.NewNotFoundError("标签不存在")
+		}
+		return nil, err
+	}
+
+	// Authorization: tag must belong to an accessible KB
+	if _, err := s.kbService.GetKnowledgeBaseByID(ctx, tag.KnowledgeBaseID); err != nil {
+		return nil, err
+	}
+
+	// Idempotent: update permission when an existing share is found.
+	existing, err := s.shareRepo.GetByTagAndGroup(ctx, tagID, groupKey)
+	if err == nil {
+		if existing.Permission != permission {
+			existing.Permission = permission
+			if sharedByUserID != "" {
+				existing.SharedByUserID = sharedByUserID
+			}
+			if uErr := s.shareRepo.Update(ctx, existing); uErr != nil {
+				return nil, uErr
+			}
+		}
+		return existing, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	share := &types.KnowledgeTagShare{
+		ID:             uuid.New().String(),
+		KnowledgeTagID: tagID,
+		GroupKey:       groupKey,
+		SharedByUserID: sharedByUserID,
+		Permission:     permission,
+	}
+	if err := s.shareRepo.Create(ctx, share); err != nil {
+		return nil, err
+	}
+	logger.Infof(ctx, "Tag %s shared to group %s with permission %s by user %s",
+		tagID, groupKey, permission, sharedByUserID)
+	return share, nil
+}
+
+// RevokeTagShare deletes a tag share record.
+func (s *knowledgeTagService) RevokeTagShare(ctx context.Context, shareID string, userID string) error {
+	shareID = strings.TrimSpace(shareID)
+	if shareID == "" {
+		return werrors.NewBadRequestError("共享ID不能为空")
+	}
+	if s.shareRepo == nil {
+		return werrors.NewInternalServerError("标签共享未启用")
+	}
+
+	share, err := s.shareRepo.GetByID(ctx, shareID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return werrors.NewNotFoundError("共享记录不存在")
+		}
+		return err
+	}
+
+	// Verify the tag's KB is accessible
+	tag, err := s.repo.GetByID(ctx, share.KnowledgeTagID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return werrors.NewForbiddenError("无权操作该共享记录")
+		}
+		return err
+	}
+	if _, err := s.kbService.GetKnowledgeBaseByID(ctx, tag.KnowledgeBaseID); err != nil {
+		return werrors.NewForbiddenError("无权操作该共享记录")
+	}
+
+	if err := s.shareRepo.Delete(ctx, shareID); err != nil {
+		return err
+	}
+	logger.Infof(ctx, "Tag share %s revoked by user %s", shareID, userID)
+	return nil
+}
+
+// ListTagShares lists all share records for a given tag.
+func (s *knowledgeTagService) ListTagShares(ctx context.Context, tagID string) ([]*types.KnowledgeTagShare, error) {
+	tagID = strings.TrimSpace(tagID)
+	if tagID == "" {
+		return nil, werrors.NewBadRequestError("标签ID不能为空")
+	}
+	if s.shareRepo == nil {
+		return []*types.KnowledgeTagShare{}, nil
+	}
+
+	tag, err := s.repo.GetByID(ctx, tagID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, werrors.NewNotFoundError("标签不存在")
+		}
+		return nil, err
+	}
+	if _, err := s.kbService.GetKnowledgeBaseByID(ctx, tag.KnowledgeBaseID); err != nil {
+		return nil, werrors.NewForbiddenError("无权查看该标签的共享列表")
+	}
+
+	return s.shareRepo.ListByTagID(ctx, tagID)
 }

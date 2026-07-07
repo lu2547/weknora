@@ -69,7 +69,7 @@ func (p *PluginMerge) expandShortContextWithNeighbors(
 	}
 
 	chunkMap := make(map[string]*types.Chunk, len(baseIDs))
-	chunks, err := p.chunkRepo.ListChunksByID(ctx, tenantID, baseIDs)
+	chunks, err := p.chunkRepo.ListChunksByID(ctx, baseIDs)
 	if err != nil {
 		pipelineWarn(ctx, "Merge", "expand_list_base_failed", map[string]interface{}{
 			"error": err.Error(),
@@ -102,7 +102,7 @@ func (p *PluginMerge) expandShortContextWithNeighbors(
 		for id := range neighborIDsSet {
 			neighborIDs = append(neighborIDs, id)
 		}
-		neighbors, err := p.chunkRepo.ListChunksByID(ctx, tenantID, neighborIDs)
+		neighbors, err := p.chunkRepo.ListChunksByID(ctx, neighborIDs)
 		if err != nil {
 			pipelineWarn(ctx, "Merge", "expand_list_neighbor_failed", map[string]interface{}{
 				"error": err.Error(),
@@ -327,7 +327,7 @@ func (p *PluginMerge) fetchChunksIfMissing(
 		return
 	}
 
-	chunks, err := p.chunkRepo.ListChunksByID(ctx, tenantID, missing)
+	chunks, err := p.chunkRepo.ListChunksByID(ctx, missing)
 	if err != nil {
 		pipelineWarn(ctx, "Merge", "expand_fetch_missing_failed", map[string]interface{}{
 			"missing_cnt": len(missing),

@@ -5,10 +5,10 @@ import (
 	"errors"
 
 	"github.com/Tencent/WeKnora/internal/logger"
+	"github.com/Tencent/WeKnora/internal/models/asr"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/models/embedding"
 	"github.com/Tencent/WeKnora/internal/models/rerank"
-	"github.com/Tencent/WeKnora/internal/models/asr"
 	"github.com/Tencent/WeKnora/internal/models/utils/ollama"
 	"github.com/Tencent/WeKnora/internal/models/vlm"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -232,9 +232,53 @@ func (s *modelService) DeleteModel(ctx context.Context, id string) error {
 	return nil
 }
 
+// resolveDefaultModelID returns the input modelId if non-empty;
+// otherwise falls back to the system's default model of the requested type:
+//   - prefer the model with IsDefault=true
+//   - else the first ACTIVE model of that type
+//
+// Used by Get(Embedding|Chat|Rerank|VLM|ASR)Model so all callers behave
+// consistently after the 三级知识库 refactor where KB/Knowledge no longer
+// persists per-resource model ids.
+func (s *modelService) resolveDefaultModelID(ctx context.Context, modelId string, modelType types.ModelType) (string, error) {
+	if modelId != "" {
+		return modelId, nil
+	}
+	models, err := s.ListModels(ctx)
+	if err != nil {
+		logger.Errorf(ctx, "resolveDefaultModelID(%s): list models failed: %v", modelType, err)
+		return "", err
+	}
+	var fallback string
+	for _, m := range models {
+		if m.Type != modelType {
+			continue
+		}
+		if m.IsDefault {
+			logger.Infof(ctx, "resolveDefaultModelID(%s): fallback to default model: %s", modelType, m.ID)
+			return m.ID, nil
+		}
+		if fallback == "" && m.Status == types.ModelStatusActive {
+			fallback = m.ID
+		}
+	}
+	if fallback == "" {
+		return "", errors.New("no " + string(modelType) + " model available (need at least one active model of this type)")
+	}
+	logger.Infof(ctx, "resolveDefaultModelID(%s): fallback to first active model: %s", modelType, fallback)
+	return fallback, nil
+}
+
 // GetEmbeddingModel retrieves and initializes an embedding model instance
 // Takes a model ID and returns an Embedder interface implementation
 func (s *modelService) GetEmbeddingModel(ctx context.Context, modelId string) (embedding.Embedder, error) {
+	// 三级知识库重构后 KB/Knowledge 不再持久化 embedding_model_id，
+	// 调用端传空则在下面统一 helper 中回退。
+	resolvedID, err := s.resolveDefaultModelID(ctx, modelId, types.ModelTypeEmbedding)
+	if err != nil {
+		return nil, err
+	}
+	modelId = resolvedID
 	// Get the model details
 	model, err := s.GetModelByID(ctx, modelId)
 	if err != nil {
@@ -328,6 +372,11 @@ func (s *modelService) GetEmbeddingModelForTenant(ctx context.Context, modelId s
 // GetRerankModel retrieves and initializes a reranking model instance
 // Takes a model ID and returns a Reranker interface implementation
 func (s *modelService) GetRerankModel(ctx context.Context, modelId string) (rerank.Reranker, error) {
+	resolvedID, err := s.resolveDefaultModelID(ctx, modelId, types.ModelTypeRerank)
+	if err != nil {
+		return nil, err
+	}
+	modelId = resolvedID
 	// Get the model details
 	model, err := s.GetModelByID(ctx, modelId)
 	if err != nil {
@@ -362,11 +411,12 @@ func (s *modelService) GetRerankModel(ctx context.Context, modelId string) (rera
 // GetChatModel retrieves and initializes a chat model instance
 // Takes a model ID and returns a Chat interface implementation
 func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.Chat, error) {
-	// Check if model ID is empty
-	if modelId == "" {
-		logger.Error(ctx, "Model ID is empty")
-		return nil, errors.New("model ID cannot be empty")
+	// 三级知识库重构后：summary 等场景会传空 modelId，统一 helper 回退。
+	resolvedID, err := s.resolveDefaultModelID(ctx, modelId, types.ModelTypeKnowledgeQA)
+	if err != nil {
+		return nil, err
 	}
+	modelId = resolvedID
 
 	tenantID := types.MustTenantIDFromContext(ctx)
 
@@ -408,9 +458,11 @@ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.C
 
 // GetVLMModel retrieves and initializes a vision language model instance.
 func (s *modelService) GetVLMModel(ctx context.Context, modelId string) (vlm.VLM, error) {
-	if modelId == "" {
-		return nil, errors.New("model ID cannot be empty")
+	resolvedID, err := s.resolveDefaultModelID(ctx, modelId, types.ModelTypeVLLM)
+	if err != nil {
+		return nil, err
 	}
+	modelId = resolvedID
 
 	tenantID := types.MustTenantIDFromContext(ctx)
 
@@ -462,9 +514,11 @@ func (s *modelService) GetVLMModel(ctx context.Context, modelId string) (vlm.VLM
 
 // GetASRModel retrieves and initializes an automatic speech recognition model instance.
 func (s *modelService) GetASRModel(ctx context.Context, modelId string) (asr.ASR, error) {
-	if modelId == "" {
-		return nil, errors.New("model ID cannot be empty")
+	resolvedID, err := s.resolveDefaultModelID(ctx, modelId, types.ModelTypeASR)
+	if err != nil {
+		return nil, err
 	}
+	modelId = resolvedID
 
 	tenantID := types.MustTenantIDFromContext(ctx)
 

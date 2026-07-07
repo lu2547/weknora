@@ -247,7 +247,7 @@ func (p *PluginMerge) resolveParentChunks(
 	for id := range parentIDs {
 		ids = append(ids, id)
 	}
-	parentChunks, err := p.chunkRepo.ListChunksByID(ctx, tenantID, ids)
+	parentChunks, err := p.chunkRepo.ListChunksByID(ctx, ids)
 	if err != nil {
 		pipelineWarn(ctx, "Merge", "parent_resolve_failed", map[string]interface{}{
 			"error": err.Error(),
@@ -322,7 +322,7 @@ func (p *PluginMerge) collectParentImageInfo(
 ) map[string]string {
 	result := make(map[string]string, len(parentIDs))
 
-	allChildren, err := p.chunkRepo.ListChunksByParentIDs(ctx, tenantID, parentIDs)
+	allChildren, err := p.chunkRepo.ListChunksByParentIDs(ctx, parentIDs)
 	if err != nil {
 		pipelineWarn(ctx, "Merge", "parent_imageinfo_fetch_failed", map[string]interface{}{
 			"parent_cnt": len(parentIDs),

@@ -31,37 +31,37 @@ import (
 type RouterParams struct {
 	dig.In
 
-	Config                *config.Config
-	UserService           interfaces.UserService
-	KBService             interfaces.KnowledgeBaseService
-	KnowledgeService      interfaces.KnowledgeService
-	ChunkService          interfaces.ChunkService
-	SessionService        interfaces.SessionService
-	MessageService        interfaces.MessageService
-	ModelService          interfaces.ModelService
-	EvaluationService     interfaces.EvaluationService
-	KBHandler             *handler.KnowledgeBaseHandler
-	KnowledgeHandler      *handler.KnowledgeHandler
-	TenantHandler         *handler.TenantHandler
-	TenantService         interfaces.TenantService
-	ChunkHandler          *handler.ChunkHandler
-	SessionHandler        *session.Handler
-	MessageHandler        *handler.MessageHandler
-	ModelHandler          *handler.ModelHandler
-	EvaluationHandler     *handler.EvaluationHandler
-	AuthHandler           *handler.AuthHandler
-	InitializationHandler *handler.InitializationHandler
-	SystemHandler         *handler.SystemHandler
-	MCPServiceHandler     *handler.MCPServiceHandler
-	WebSearchHandler              *handler.WebSearchHandler
-	WebSearchProviderHandler      *handler.WebSearchProviderHandler
-	FAQHandler            *handler.FAQHandler
-	TagHandler            *handler.TagHandler
-	CustomAgentHandler    *handler.CustomAgentHandler
-	SkillHandler          *handler.SkillHandler
-	OrganizationHandler   *handler.OrganizationHandler
-	IMHandler             *handler.IMHandler
-	DataSourceHandler     *handler.DataSourceHandler
+	Config                   *config.Config
+	UserService              interfaces.UserService
+	KBService                interfaces.KnowledgeBaseService
+	KnowledgeService         interfaces.KnowledgeService
+	ChunkService             interfaces.ChunkService
+	SessionService           interfaces.SessionService
+	MessageService           interfaces.MessageService
+	ModelService             interfaces.ModelService
+	EvaluationService        interfaces.EvaluationService
+	KBHandler                *handler.KnowledgeBaseHandler
+	KnowledgeHandler         *handler.KnowledgeHandler
+	TenantHandler            *handler.TenantHandler
+	TenantService            interfaces.TenantService
+	ChunkHandler             *handler.ChunkHandler
+	SessionHandler           *session.Handler
+	MessageHandler           *handler.MessageHandler
+	ModelHandler             *handler.ModelHandler
+	EvaluationHandler        *handler.EvaluationHandler
+	AuthHandler              *handler.AuthHandler
+	InitializationHandler    *handler.InitializationHandler
+	SystemHandler            *handler.SystemHandler
+	MCPServiceHandler        *handler.MCPServiceHandler
+	WebSearchHandler         *handler.WebSearchHandler
+	WebSearchProviderHandler *handler.WebSearchProviderHandler
+	FAQHandler               *handler.FAQHandler
+	TagHandler               *handler.TagHandler
+	CustomAgentHandler       *handler.CustomAgentHandler
+	SkillHandler             *handler.SkillHandler
+	OrganizationHandler      *handler.OrganizationHandler
+	IMHandler                *handler.IMHandler
+	DataSourceHandler        *handler.DataSourceHandler
 }
 
 // NewRouter 创建新的路由
@@ -273,6 +273,9 @@ func RegisterKnowledgeBaseRoutes(r *gin.RouterGroup, handler *handler.KnowledgeB
 		// 获取可移动目标知识库列表
 		kb.GET("/:id/move-targets", handler.ListMoveTargets)
 	}
+
+	// 跨知识库 chunk 检索（三级架构下不依赖路径上的 KB ID）
+	r.POST("/knowledge-chunks/search", handler.ChunksSearch)
 }
 
 // RegisterKnowledgeTagRoutes 注册知识库标签相关路由
@@ -285,7 +288,18 @@ func RegisterKnowledgeTagRoutes(r *gin.RouterGroup, tagHandler *handler.TagHandl
 		kbTags.GET("", tagHandler.ListTags)
 		kbTags.POST("", tagHandler.CreateTag)
 		kbTags.PUT("/:tag_id", tagHandler.UpdateTag)
+		kbTags.POST("/:tag_id/move", tagHandler.MoveTag)
 		kbTags.DELETE("/:tag_id", tagHandler.DeleteTag)
+	}
+	// Tag tree view (hierarchical)
+	r.GET("/knowledge-bases/:id/tag-tree", tagHandler.ListTagTree)
+
+	// Tag share endpoints (cross-org sharing of a tag)
+	tagShares := r.Group("/knowledge-tags/:tag_id/shares")
+	{
+		tagShares.POST("", tagHandler.CreateTagShare)
+		tagShares.GET("", tagHandler.ListTagShares)
+		tagShares.DELETE("/:share_id", tagHandler.DeleteTagShare)
 	}
 }
 

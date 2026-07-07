@@ -265,7 +265,8 @@ func (q *qdrantRepository) BatchSave(ctx context.Context,
 }
 
 // DeleteByChunkIDList removes points from the collection based on chunk IDs
-func (q *qdrantRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList []string, dimension int, knowledgeType string) error {
+func (q *qdrantRepository) DeleteByChunkIDList(ctx context.Context, knowledgeBaseID string, chunkIDList []string, dimension int, knowledgeType string) error {
+	_ = knowledgeBaseID
 	log := logger.GetLogger(ctx)
 	if len(chunkIDList) == 0 {
 		log.Warn("[Qdrant] Empty chunk ID list provided for deletion, skipping")
@@ -294,8 +295,9 @@ func (q *qdrantRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList 
 
 // DeleteByKnowledgeIDList removes points from the collection based on knowledge IDs
 func (q *qdrantRepository) DeleteByKnowledgeIDList(ctx context.Context,
-	knowledgeIDList []string, dimension int, knowledgeType string,
+	knowledgeBaseID string, knowledgeIDList []string, dimension int, knowledgeType string,
 ) error {
+	_ = knowledgeBaseID
 	log := logger.GetLogger(ctx)
 	if len(knowledgeIDList) == 0 {
 		log.Warn("[Qdrant] Empty knowledge ID list provided for deletion, skipping")
@@ -324,8 +326,9 @@ func (q *qdrantRepository) DeleteByKnowledgeIDList(ctx context.Context,
 
 // DeleteBySourceIDList removes points from the collection based on source IDs
 func (q *qdrantRepository) DeleteBySourceIDList(ctx context.Context,
-	sourceIDList []string, dimension int, knowledgeType string,
+	knowledgeBaseID string, sourceIDList []string, dimension int, knowledgeType string,
 ) error {
+	_ = knowledgeBaseID
 	log := logger.GetLogger(ctx)
 	if len(sourceIDList) == 0 {
 		log.Warn("[Qdrant] Empty source ID list provided for deletion, skipping")
@@ -352,9 +355,26 @@ func (q *qdrantRepository) DeleteBySourceIDList(ctx context.Context,
 	return nil
 }
 
+// DropKnowledgeBaseCollection is a no-op for qdrant backend (dimension-based collection naming)
+// EnsureCollection is a no-op for qdrant: its single shared collection is provisioned
+// lazily by ensureCollection on first write, and is not partitioned per KB.
+func (q *qdrantRepository) EnsureCollection(ctx context.Context, knowledgeBaseID string, dimension int) error {
+	_ = ctx
+	_ = knowledgeBaseID
+	_ = dimension
+	return nil
+}
+
+func (q *qdrantRepository) DropKnowledgeBaseCollection(ctx context.Context, knowledgeBaseID string) error {
+	_ = ctx
+	_ = knowledgeBaseID
+	return nil
+}
+
 // BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch
 // This method operates on all collections since dimension is not provided
-func (q *qdrantRepository) BatchUpdateChunkEnabledStatus(ctx context.Context, chunkStatusMap map[string]bool) error {
+func (q *qdrantRepository) BatchUpdateChunkEnabledStatus(ctx context.Context, knowledgeBaseID string, chunkStatusMap map[string]bool) error {
+	_ = knowledgeBaseID
 	log := logger.GetLogger(ctx)
 	if len(chunkStatusMap) == 0 {
 		log.Warn("[Qdrant] Empty chunk status map provided, skipping")
@@ -428,7 +448,8 @@ func (q *qdrantRepository) BatchUpdateChunkEnabledStatus(ctx context.Context, ch
 }
 
 // BatchUpdateChunkTagID updates the tag ID of chunks in batch
-func (q *qdrantRepository) BatchUpdateChunkTagID(ctx context.Context, chunkTagMap map[string]string) error {
+func (q *qdrantRepository) BatchUpdateChunkTagID(ctx context.Context, knowledgeBaseID string, chunkTagMap map[string]types.ChunkTagUpdate) error {
+	_ = knowledgeBaseID
 	log := logger.GetLogger(ctx)
 	if len(chunkTagMap) == 0 {
 		log.Warn("[Qdrant] Empty chunk tag map provided, skipping")
@@ -444,9 +465,10 @@ func (q *qdrantRepository) BatchUpdateChunkTagID(ctx context.Context, chunkTagMa
 		return fmt.Errorf("failed to list collections: %w", err)
 	}
 
-	// Group chunks by tag ID for batch updates
+	// Group chunks by leaf tag ID for batch updates
 	tagGroups := make(map[string][]string)
-	for chunkID, tagID := range chunkTagMap {
+	for chunkID, upd := range chunkTagMap {
+		tagID := types.LeafTagID(upd.TagIDs)
 		tagGroups[tagID] = append(tagGroups[tagID], chunkID)
 	}
 
@@ -928,7 +950,7 @@ func toQdrantVectorEmbedding(embedding *types.IndexInfo, additionalParams map[st
 		ChunkID:         embedding.ChunkID,
 		KnowledgeID:     embedding.KnowledgeID,
 		KnowledgeBaseID: embedding.KnowledgeBaseID,
-		TagID:           embedding.TagID,
+		TagID:           types.LeafTagID(embedding.TagIDs),
 		IsEnabled:       embedding.IsEnabled,
 	}
 	if additionalParams != nil && slices.Contains(slices.Collect(maps.Keys(additionalParams)), fieldEmbedding) {
@@ -951,7 +973,7 @@ func fromQdrantVectorEmbedding(id string,
 		ChunkID:         embedding.ChunkID,
 		KnowledgeID:     embedding.KnowledgeID,
 		KnowledgeBaseID: embedding.KnowledgeBaseID,
-		TagID:           embedding.TagID,
+		TagIDs:          types.SingletonTagIDs(embedding.TagID),
 		Content:         embedding.Content,
 		Score:           embedding.Score,
 		MatchType:       matchType,

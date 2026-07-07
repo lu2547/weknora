@@ -229,7 +229,7 @@ func (s *sessionService) restrictMentionsToAgentScope(
 
 	filteredKnowledge := knowledgeIDs
 	if len(knowledgeIDs) > 0 {
-		knowledgeList, err := s.knowledgeService.GetKnowledgeBatch(ctx, agent.TenantID, knowledgeIDs)
+		knowledgeList, err := s.knowledgeService.GetKnowledgeBatch(ctx, knowledgeIDs)
 		if err != nil {
 			logger.Warnf(ctx, "Failed to validate knowledge IDs against agent scope: %v, blocking all", err)
 			filteredKnowledge = nil

@@ -1,0 +1,24 @@
+[electron] Main HTTP server on port 53963
+Checking for update
+Update for version 3.0.0-beta.4 is not available (latest version: 3.0.0-beta.4, downgrade is disallowed).
+[electron] Main HTTP server on port 54192
+Checking for update
+Found version 3.0.0-beta.4 (url: attu-3.0.0-beta.4-arm64.zip, attu-3.0.0-beta.4-arm64.dmg)
+[updater] Update available: v3.0.0-beta.4
+Downloading update from attu-3.0.0-beta.4-arm64.zip, attu-3.0.0-beta.4-arm64.dmg
+Checking for macOS Rosetta environment
+Checked for macOS Rosetta environment (isRosetta=false)
+Checking for arm64 in uname
+Checked 'uname -a': arm64=true
+updater cache dir: /Users/frankie/Library/Caches/@attuelectron-updater
+Unable to locate previous update.zip for differential download (is this first install?), falling back to full download
+New version 3.0.0-beta.4 has been downloaded to /Users/frankie/Library/Caches/@attuelectron-updater/pending/attu-3.0.0-beta.4-arm64.zip
+Creating proxy server for native Squirrel.Mac (fileToProxy=https://github.com/zilliztech/attu/releases/download/v3.0.0-beta.4/attu-3.0.0-beta.4-arm64.zip)
+Proxy server for native Squirrel.Mac is created (fileToProxy=https://github.com/zilliztech/attu/releases/download/v3.0.0-beta.4/attu-3.0.0-beta.4-arm64.zip)
+Proxy server for native Squirrel.Mac is starting to listen (fileToProxy=https://github.com/zilliztech/attu/releases/download/v3.0.0-beta.4/attu-3.0.0-beta.4-arm64.zip)
+Proxy server for native Squirrel.Mac is listening (address=http://127.0.0.1:54209, fileToProxy=https://github.com/zilliztech/attu/releases/download/v3.0.0-beta.4/attu-3.0.0-beta.4-arm64.zip)
+[updater] Update downloaded: v3.0.0-beta.4
+[updater] Downloaded file: /Users/frankie/Library/Caches/@attuelectron-updater/pending/attu-3.0.0-beta.4-arm64.zip
+/ requested
+/876a8f3fee6dfe6d986f47d0e067f297d9fa199a9f13b1cad786f9595cad1f7654a591bdd46b59f8affbbfda144a7b48dc787cffa2d0d72016555ef7ebc917b0.zip requested
+/876a8f3fee6dfe6d986f47d0e067f297d9fa199a9f13b1cad786f9595cad1f7654a591bdd46b59f8affbbfda144a7b48dc787cffa2d0d72016555ef7ebc917b0.zip requested by Squirrel.Mac, pipe /Users/frankie/Library/Caches/@attuelectron-updater/pending/attu-3.0.0-beta.4-arm64.zip

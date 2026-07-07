@@ -49,15 +49,6 @@ func (t *DataSchemaTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 		}, err
 	}
 
-	// Get knowledge to get TenantID (use IDOnly to support cross-tenant shared KB)
-	knowledge, err := t.knowledgeService.GetKnowledgeByIDOnly(ctx, input.KnowledgeID)
-	if err != nil {
-		return &types.ToolResult{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to get knowledge '%s': %v", input.KnowledgeID, err),
-		}, err
-	}
-
 	// Get chunks for the knowledge ID using ChunkRepository
 	// We only need table summary and column chunks
 	chunkTypes := t.targetChunkTypes
@@ -68,7 +59,6 @@ func (t *DataSchemaTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 
 	chunks, _, err := t.chunkRepo.ListPagedChunksByKnowledgeID(
 		ctx,
-		knowledge.TenantID,
 		input.KnowledgeID,
 		page,
 		chunkTypes,

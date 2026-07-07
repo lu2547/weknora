@@ -76,6 +76,7 @@ builtin_agents:
       allowed_tools:
         - "thinking"
         - "todo_write"
+        - "select_documents"
         - "knowledge_search"
         - "grep_chunks"
         - "list_knowledge_chunks"

@@ -162,7 +162,6 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) e
 	if imageInfo.OCRText != "" {
 		newChunks = append(newChunks, &types.Chunk{
 			ID:              uuid.New().String(),
-			TenantID:        payload.TenantID,
 			KnowledgeID:     payload.KnowledgeID,
 			KnowledgeBaseID: payload.KnowledgeBaseID,
 			Content:         imageInfo.OCRText,
@@ -179,7 +178,6 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) e
 	if imageInfo.Caption != "" {
 		newChunks = append(newChunks, &types.Chunk{
 			ID:              uuid.New().String(),
-			TenantID:        payload.TenantID,
 			KnowledgeID:     payload.KnowledgeID,
 			KnowledgeBaseID: payload.KnowledgeBaseID,
 			Content:         imageInfo.Caption,
@@ -232,7 +230,7 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) e
 //     (processChunks kept it in "processing" to wait for multimodal results).
 //   - For images extracted from PDFs: no-op (description comes from summary generation).
 func (s *ImageMultimodalService) finalizeImageKnowledge(ctx context.Context, payload types.ImageMultimodalPayload, caption string) {
-	knowledge, err := s.knowledgeRepo.GetKnowledgeByIDOnly(ctx, payload.KnowledgeID)
+	knowledge, err := s.knowledgeRepo.GetKnowledgeByID(ctx, payload.KnowledgeID)
 	if err != nil {
 		logger.Warnf(ctx, "[ImageMultimodal] Failed to get knowledge %s: %v", payload.KnowledgeID, err)
 		return
@@ -266,7 +264,23 @@ func (s *ImageMultimodalService) indexChunks(ctx context.Context, payload types.
 		return
 	}
 
-	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, kb.EmbeddingModelID)
+	// Use default embedding model
+	var embeddingModelID string
+	models, mErr := s.modelService.ListModels(ctx)
+	if mErr == nil {
+		for _, m := range models {
+			if m.Type == types.ModelTypeEmbedding && m.IsDefault {
+				embeddingModelID = m.ID
+				break
+			}
+		}
+	}
+	if embeddingModelID == "" {
+		logger.Warnf(ctx, "[ImageMultimodal] No default embedding model found for indexing")
+		return
+	}
+
+	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, embeddingModelID)
 	if err != nil {
 		logger.Warnf(ctx, "[ImageMultimodal] Failed to get embedding model for indexing: %v", err)
 		return
@@ -285,6 +299,15 @@ func (s *ImageMultimodalService) indexChunks(ctx context.Context, payload types.
 	}
 
 	indexInfoList := make([]*types.IndexInfo, 0, len(chunks))
+	// 从知识表取 file_name / tag_id，同一知识下的图片 chunk 共享元数据。
+	knowledge, kErr := s.knowledgeRepo.GetKnowledgeByID(ctx, payload.KnowledgeID)
+	var knowledgeFileName, knowledgeTagID string
+	if kErr != nil || knowledge == nil {
+		logger.Warnf(ctx, "[ImageMultimodal] Failed to get knowledge %s for index metadata: %v", payload.KnowledgeID, kErr)
+	} else {
+		knowledgeFileName = knowledge.FileName
+		knowledgeTagID = knowledge.TagID
+	}
 	for _, chunk := range chunks {
 		indexInfoList = append(indexInfoList, &types.IndexInfo{
 			Content:         chunk.Content,
@@ -293,6 +316,9 @@ func (s *ImageMultimodalService) indexChunks(ctx context.Context, payload types.
 			ChunkID:         chunk.ID,
 			KnowledgeID:     chunk.KnowledgeID,
 			KnowledgeBaseID: chunk.KnowledgeBaseID,
+			TagIDs:          types.SingletonTagIDs(knowledgeTagID),
+			FileName:        knowledgeFileName,
+			IsEnabled:       true,
 		})
 	}
 
@@ -305,7 +331,7 @@ func (s *ImageMultimodalService) indexChunks(ctx context.Context, payload types.
 	// Must re-fetch from DB because the in-memory objects lack auto-generated fields
 	// (e.g. seq_id), and GORM Save would overwrite them with zero values.
 	for _, chunk := range chunks {
-		dbChunk, err := s.chunkService.GetChunkByIDOnly(ctx, chunk.ID)
+		dbChunk, err := s.chunkService.GetChunkByID(ctx, chunk.ID)
 		if err != nil {
 			logger.Warnf(ctx, "[ImageMultimodal] Failed to fetch chunk %s for status update: %v", chunk.ID, err)
 			continue
@@ -327,7 +353,7 @@ func (s *ImageMultimodalService) updateParentChunkImageInfo(ctx context.Context,
 		return
 	}
 
-	chunk, err := s.chunkService.GetChunkByIDOnly(ctx, payload.ChunkID)
+	chunk, err := s.chunkService.GetChunkByID(ctx, payload.ChunkID)
 	if err != nil {
 		logger.Warnf(ctx, "[ImageMultimodal] Failed to get parent chunk %s: %v", payload.ChunkID, err)
 		return
@@ -360,29 +386,33 @@ func (s *ImageMultimodalService) updateParentChunkImageInfo(ctx context.Context,
 	}
 }
 
-// resolveVLM creates a vlm.VLM instance for the given knowledge base,
-// supporting both new-style (ModelID) and legacy (inline BaseURL) configs.
+// resolveVLM creates a vlm.VLM instance using the default VLLM model.
 func (s *ImageMultimodalService) resolveVLM(ctx context.Context, kbID string) (vlm.VLM, error) {
-	kb, err := s.kbService.GetKnowledgeBaseByIDOnly(ctx, kbID)
+	// Find default VLLM model from model service
+	models, err := s.modelService.ListModels(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("get knowledge base %s: %w", kbID, err)
+		return nil, fmt.Errorf("list models: %w", err)
 	}
-	if kb == nil {
-		return nil, fmt.Errorf("knowledge base %s not found", kbID)
+	var vlmModelID string
+	for _, m := range models {
+		if m.Type == types.ModelTypeVLLM && m.IsDefault {
+			vlmModelID = m.ID
+			break
+		}
 	}
-
-	vlmCfg := kb.VLMConfig
-	if !vlmCfg.IsEnabled() {
-		return nil, fmt.Errorf("VLM is not enabled for knowledge base %s", kbID)
+	if vlmModelID == "" {
+		// fallback: use first VLLM model
+		for _, m := range models {
+			if m.Type == types.ModelTypeVLLM {
+				vlmModelID = m.ID
+				break
+			}
+		}
 	}
-
-	// New-style: resolve model through ModelService
-	if vlmCfg.ModelID != "" {
-		return s.modelService.GetVLMModel(ctx, vlmCfg.ModelID)
+	if vlmModelID == "" {
+		return nil, fmt.Errorf("no VLLM model configured")
 	}
-
-	// Legacy: create VLM from inline config
-	return vlm.NewVLMFromLegacyConfig(vlmCfg, s.ollamaService)
+	return s.modelService.GetVLMModel(ctx, vlmModelID)
 }
 
 // resolveFileServiceForPayload resolves tenant/KB scoped file service for reading provider:// URLs.
@@ -394,13 +424,8 @@ func (s *ImageMultimodalService) resolveFileServiceForPayload(ctx context.Contex
 	}
 
 	provider := types.ParseProviderScheme(payload.ImageURL)
-	if provider == "" {
-		kb, kbErr := s.kbService.GetKnowledgeBaseByIDOnly(ctx, payload.KnowledgeBaseID)
-		if kbErr != nil {
-			logger.Warnf(ctx, "[ImageMultimodal] GetKnowledgeBaseByIDOnly failed: kb=%s err=%v", payload.KnowledgeBaseID, kbErr)
-		} else if kb != nil {
-			provider = strings.ToLower(strings.TrimSpace(kb.GetStorageProvider()))
-		}
+	if provider == "" && tenant.StorageEngineConfig != nil {
+		provider = strings.ToLower(strings.TrimSpace(tenant.StorageEngineConfig.DefaultProvider))
 	}
 
 	baseDir := strings.TrimSpace(os.Getenv("LOCAL_STORAGE_BASE_DIR"))

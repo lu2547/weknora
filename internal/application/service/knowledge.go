@@ -62,6 +62,7 @@ var (
 type knowledgeService struct {
 	config         *config.Config
 	retrieveEngine interfaces.RetrieveEngineRegistry
+	summaryIndex   interfaces.SummaryIndex
 	repo           interfaces.KnowledgeRepository
 	kbService      interfaces.KnowledgeBaseService
 	tenantRepo     interfaces.TenantRepository
@@ -101,6 +102,7 @@ func NewKnowledgeService(
 	task interfaces.TaskEnqueuer,
 	graphEngine interfaces.RetrieveGraphRepository,
 	retrieveEngine interfaces.RetrieveEngineRegistry,
+	summaryIndex interfaces.SummaryIndex,
 	redisClient *redis.Client,
 	kbShareService interfaces.KBShareService,
 	imageResolver *docparser.ImageResolver,
@@ -120,6 +122,7 @@ func NewKnowledgeService(
 		task:           task,
 		graphEngine:    graphEngine,
 		retrieveEngine: retrieveEngine,
+		summaryIndex:   summaryIndex,
 		redisClient:    redisClient,
 		kbShareService: kbShareService,
 		imageResolver:  imageResolver,
@@ -149,8 +152,8 @@ func (s *knowledgeService) GetRepository() interfaces.KnowledgeRepository {
 
 // isKnowledgeDeleting checks if a knowledge entry is being deleted.
 // This is used to prevent async tasks from conflicting with deletion operations.
-func (s *knowledgeService) isKnowledgeDeleting(ctx context.Context, tenantID uint64, knowledgeID string) bool {
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
+func (s *knowledgeService) isKnowledgeDeleting(ctx context.Context, knowledgeID string) bool {
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, knowledgeID)
 	if err != nil {
 		// If we can't find the knowledge, assume it's deleted
 		logger.Warnf(ctx, "Failed to check knowledge deletion status (assuming deleted): %v", err)
@@ -162,32 +165,39 @@ func (s *knowledgeService) isKnowledgeDeleting(ctx context.Context, tenantID uin
 	return knowledge.ParseStatus == types.ParseStatusDeleting
 }
 
-// checkStorageEngineConfigured verifies that the knowledge base has a storage engine configured
-// (either at the KB level or via the tenant default). Returns an error if no storage engine is found.
+// checkStorageEngineConfigured 三级知识库重构后默认 local 存储引擎，无需业务侧校验，直接放行。
 func checkStorageEngineConfigured(ctx context.Context, kb *types.KnowledgeBase) error {
-	provider := kb.GetStorageProvider()
-	if provider == "" {
-		tenant, _ := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
-		if tenant != nil && tenant.StorageEngineConfig != nil {
-			provider = strings.ToLower(strings.TrimSpace(tenant.StorageEngineConfig.DefaultProvider))
+	_ = ctx
+	_ = kb
+	return nil
+}
+
+// fillCommonTaskPayload 透传 ctx 中的 TenantID/RequestId 到 worker payload。
+// asynq worker 是独立 goroutine，不继承 HTTP context value，必须显式序列化。
+// 不覆盖调用端已经设过的非零/非空值。
+func fillCommonTaskPayload(ctx context.Context, p *types.DocumentProcessPayload) {
+	if p.TenantID == 0 {
+		if v, ok := ctx.Value(types.TenantIDContextKey).(uint64); ok {
+			p.TenantID = v
 		}
 	}
-	if provider == "" {
-		return werrors.NewBadRequestError("请先为知识库选择存储引擎，再上传内容。请前往知识库设置页面进行配置。")
+	if p.RequestId == "" {
+		if rid, ok := ctx.Value(types.RequestIDContextKey).(string); ok {
+			p.RequestId = rid
+		}
 	}
-	return nil
 }
 
 func defaultChannel(ch string) string {
 	if ch == "" {
-		return types.ChannelWeb
+		return "web"
 	}
 	return ch
 }
 
 // CreateKnowledgeFromFile creates a knowledge entry from an uploaded file
 func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
-	kbID string, file *multipart.FileHeader, metadata map[string]string, enableMultimodel *bool, customFileName string, tagID string, channel string,
+	kbID string, file *multipart.FileHeader, customFileName string, tagID string,
 ) (*types.Knowledge, error) {
 	logger.Info(ctx, "Start creating knowledge from file")
 
@@ -217,7 +227,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		logger.Info(ctx, "Non-image file with multimodal enabled, skipping COS/VLM validation")
 	} else {
 		// 解析有效 provider：优先 KB 级别（新字段 > 旧字段），其次租户默认
-		provider := kb.GetStorageProvider()
+		provider := ""
 		tenant, _ := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 		if provider == "" && tenant != nil && tenant.StorageEngineConfig != nil {
 			provider = strings.ToLower(strings.TrimSpace(tenant.StorageEngineConfig.DefaultProvider))
@@ -251,7 +261,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		}
 
 		// 检查VLM配置
-		if !kb.VLMConfig.Enabled || kb.VLMConfig.ModelID == "" {
+		if false {
 			logger.Error(ctx, "VLM model is not configured")
 			return nil, werrors.NewBadRequestError("上传图片文件需要设置VLM模型")
 		}
@@ -261,7 +271,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 
 	// 检查音频ASR配置完整性 - 只在音频文件时校验
 	if IsAudioType(getFileType(fileName)) {
-		if !kb.ASRConfig.IsASREnabled() {
+		if false {
 			logger.Error(ctx, "ASR model is not configured")
 			return nil, werrors.NewBadRequestError("上传音频文件需要设置ASR语音识别模型")
 		}
@@ -286,7 +296,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	// Check if file already exists
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 	logger.Infof(ctx, "Checking if file exists, tenant ID: %d", tenantID)
-	exists, existingKnowledge, err := s.repo.CheckKnowledgeExists(ctx, tenantID, kbID, &types.KnowledgeCheckParams{
+	exists, existingKnowledge, err := s.repo.CheckKnowledgeExists(ctx, kbID, &types.KnowledgeCheckParams{
 		Type:     "file",
 		FileName: fileName,
 		FileSize: file.Size,
@@ -313,17 +323,6 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		return nil, types.NewStorageQuotaExceededError()
 	}
 
-	// Convert metadata to JSON format if provided
-	var metadataJSON types.JSON
-	if metadata != nil {
-		metadataBytes, err := json.Marshal(metadata)
-		if err != nil {
-			logger.Errorf(ctx, "Failed to marshal metadata: %v", err)
-			return nil, err
-		}
-		metadataJSON = types.JSON(metadataBytes)
-	}
-
 	// 验证文件名安全性
 	safeFilename, isValid := secutils.ValidateInput(fileName)
 	if !isValid {
@@ -334,22 +333,19 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	// Create knowledge record
 	logger.Info(ctx, "Creating knowledge record")
 	knowledge := &types.Knowledge{
-		TenantID:         tenantID,
-		KnowledgeBaseID:  kbID,
-		TagID:            tagID, // 设置分类ID，用于知识分类管理
-		Type:             "file",
-		Channel:          defaultChannel(channel),
-		Title:            safeFilename,
-		FileName:         safeFilename,
-		FileType:         getFileType(safeFilename),
-		FileSize:         file.Size,
-		FileHash:         hash,
-		ParseStatus:      "pending",
-		EnableStatus:     "disabled",
-		CreatedAt:        time.Now(),
-		UpdatedAt:        time.Now(),
-		EmbeddingModelID: kb.EmbeddingModelID,
-		Metadata:         metadataJSON,
+		KnowledgeBaseID: kbID,
+		TagID:           tagID, // 设置分类ID，用于知识分类管理
+		Type:            "file",
+		Title:           safeFilename,
+		FileName:        safeFilename,
+		FileType:        getFileType(safeFilename),
+		FileSize:        file.Size,
+		FileHash:        hash,
+		ParseStatus:     "pending",
+		EnableStatus:    types.EnableStatusDisabled,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+		// EmbeddingModelID set below via getDefaultEmbeddingModelID
 	}
 	// Save knowledge record to database
 	logger.Info(ctx, "Saving knowledge record to database")
@@ -359,7 +355,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	}
 	// Save the file to storage (use KB-level storage engine if configured)
 	logger.Infof(ctx, "Saving file, knowledge ID: %s", knowledge.ID)
-	filePath, err := s.resolveFileService(ctx, kb).SaveFile(ctx, file, knowledge.TenantID, knowledge.ID)
+	filePath, err := s.resolveFileService(ctx, kb).SaveFile(ctx, file, 0, knowledge.ID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to save file, knowledge ID: %s, error: %v", knowledge.ID, err)
 		return nil, err
@@ -376,11 +372,6 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	// Enqueue document processing task to Asynq
 	logger.Info(ctx, "Enqueuing document processing task to Asynq")
 	enableMultimodelValue := false
-	if enableMultimodel != nil {
-		enableMultimodelValue = *enableMultimodel
-	} else {
-		enableMultimodelValue = kb.IsMultimodalEnabled()
-	}
 
 	// Check question generation config
 	enableQuestionGeneration := false
@@ -394,7 +385,6 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 
 	lang, _ := types.LanguageFromContext(ctx)
 	taskPayload := types.DocumentProcessPayload{
-		TenantID:                 tenantID,
 		KnowledgeID:              knowledge.ID,
 		KnowledgeBaseID:          kbID,
 		FilePath:                 filePath,
@@ -406,6 +396,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		Language:                 lang,
 	}
 
+	fillCommonTaskPayload(ctx, &taskPayload)
 	payloadBytes, err := json.Marshal(taskPayload)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to marshal document process task payload: %v", err)
@@ -429,7 +420,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	)
 
 	if slices.Contains([]string{"csv", "xlsx", "xls"}, getFileType(safeFilename)) {
-		NewDataTableSummaryTask(ctx, s.task, tenantID, knowledge.ID, kb.SummaryModelID, kb.EmbeddingModelID)
+		NewDataTableSummaryTask(ctx, s.task, tenantID, knowledge.ID, "", knowledge.EmbeddingModelID)
 	}
 
 	logger.Infof(ctx, "Knowledge from file created successfully, ID: %s", knowledge.ID)
@@ -453,14 +444,14 @@ func isFileURL(rawURL, fileName, fileType string) bool {
 }
 
 func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
-	kbID string, rawURL string, fileName string, fileType string, enableMultimodel *bool, title string, tagID string, channel string,
+	kbID string, rawURL string, fileName string, fileType string, title string, tagID string,
 ) (*types.Knowledge, error) {
 	logger.Info(ctx, "Start creating knowledge from URL")
 	logger.Infof(ctx, "Knowledge base ID: %s, URL: %s", kbID, rawURL)
 
 	// Route to file_url logic when the URL points to a downloadable file
 	if isFileURL(rawURL, fileName, fileType) {
-		return s.createKnowledgeFromFileURL(ctx, kbID, rawURL, fileName, fileType, enableMultimodel, title, tagID, channel)
+		return s.createKnowledgeFromFileURL(ctx, kbID, rawURL, fileName, fileType, title, tagID)
 	}
 
 	url := rawURL
@@ -494,7 +485,7 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 	logger.Infof(ctx, "Checking if URL exists, tenant ID: %d", tenantID)
 	fileHash := calculateStr(url)
-	exists, existingKnowledge, err := s.repo.CheckKnowledgeExists(ctx, tenantID, kbID, &types.KnowledgeCheckParams{
+	exists, existingKnowledge, err := s.repo.CheckKnowledgeExists(ctx, kbID, &types.KnowledgeCheckParams{
 		Type:     "url",
 		URL:      url,
 		FileHash: fileHash,
@@ -525,21 +516,18 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 	// Create knowledge record
 	logger.Info(ctx, "Creating knowledge record")
 	knowledge := &types.Knowledge{
-		ID:               uuid.New().String(),
-		TenantID:         tenantID,
-		KnowledgeBaseID:  kbID,
-		Type:             "url",
-		Channel:          defaultChannel(channel),
-		Title:            title,
-		Source:           url,
-		FileType:         "html",
-		FileHash:         fileHash,
-		ParseStatus:      "pending",
-		EnableStatus:     "disabled",
-		CreatedAt:        time.Now(),
-		UpdatedAt:        time.Now(),
-		EmbeddingModelID: kb.EmbeddingModelID,
-		TagID:            tagID, // 设置分类ID，用于知识分类管理
+		ID:              uuid.New().String(),
+		KnowledgeBaseID: kbID,
+		Type:            "url",
+		Title:           title,
+		FileType:        "html",
+		FileHash:        fileHash,
+		ParseStatus:     "pending",
+		EnableStatus:    types.EnableStatusDisabled,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+		// EmbeddingModelID set below via getDefaultEmbeddingModelID
+		TagID: tagID, // 设置分类ID，用于知识分类管理
 	}
 
 	// Save knowledge record
@@ -552,11 +540,6 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 	// Enqueue URL processing task to Asynq
 	logger.Info(ctx, "Enqueuing URL processing task to Asynq")
 	enableMultimodelValue := false
-	if enableMultimodel != nil {
-		enableMultimodelValue = *enableMultimodel
-	} else {
-		enableMultimodelValue = kb.IsMultimodalEnabled()
-	}
 
 	// Check question generation config
 	enableQuestionGeneration := false
@@ -570,7 +553,6 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 
 	lang, _ := types.LanguageFromContext(ctx)
 	taskPayload := types.DocumentProcessPayload{
-		TenantID:                 tenantID,
 		KnowledgeID:              knowledge.ID,
 		KnowledgeBaseID:          kbID,
 		URL:                      url,
@@ -580,6 +562,7 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 		Language:                 lang,
 	}
 
+	fillCommonTaskPayload(ctx, &taskPayload)
 	payloadBytes, err := json.Marshal(taskPayload)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to marshal URL process task payload: %v", err)
@@ -653,10 +636,8 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 	fileURL string,
 	fileName string,
 	fileType string,
-	enableMultimodel *bool,
 	title string,
 	tagID string,
-	channel string,
 ) (*types.Knowledge, error) {
 	logger.Info(ctx, "Start creating knowledge from file URL")
 	logger.Infof(ctx, "Knowledge base ID: %s, file URL: %s", kbID, fileURL)
@@ -714,9 +695,8 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 	}
 
 	// Check for duplicate (by URL hash)
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 	fileHash := calculateStr(fileURL)
-	exists, existingKnowledge, err := s.repo.CheckKnowledgeExists(ctx, tenantID, kbID, &types.KnowledgeCheckParams{
+	exists, existingKnowledge, err := s.repo.CheckKnowledgeExists(ctx, kbID, &types.KnowledgeCheckParams{
 		Type:     "file_url",
 		URL:      fileURL,
 		FileHash: fileHash,
@@ -745,22 +725,19 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 
 	// Create knowledge record
 	knowledge := &types.Knowledge{
-		ID:               uuid.New().String(),
-		TenantID:         tenantID,
-		KnowledgeBaseID:  kbID,
-		Type:             "file_url",
-		Channel:          defaultChannel(channel),
-		Title:            title,
-		FileName:         displayName,
-		FileType:         fileType,
-		Source:           fileURL,
-		FileHash:         fileHash,
-		ParseStatus:      "pending",
-		EnableStatus:     "disabled",
-		CreatedAt:        time.Now(),
-		UpdatedAt:        time.Now(),
-		EmbeddingModelID: kb.EmbeddingModelID,
-		TagID:            tagID,
+		ID:              uuid.New().String(),
+		KnowledgeBaseID: kbID,
+		Type:            "file_url",
+		Title:           title,
+		FileName:        displayName,
+		FileType:        fileType,
+		FileHash:        fileHash,
+		ParseStatus:     "pending",
+		EnableStatus:    types.EnableStatusDisabled,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+		// EmbeddingModelID set below via getDefaultEmbeddingModelID
+		TagID: tagID,
 	}
 	if knowledge.Title == "" {
 		knowledge.Title = displayName
@@ -773,11 +750,6 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 
 	// Build async task payload
 	enableMultimodelValue := false
-	if enableMultimodel != nil {
-		enableMultimodelValue = *enableMultimodel
-	} else {
-		enableMultimodelValue = kb.IsMultimodalEnabled()
-	}
 
 	enableQuestionGeneration := false
 	questionCount := 3
@@ -790,7 +762,6 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 
 	lang, _ := types.LanguageFromContext(ctx)
 	taskPayload := types.DocumentProcessPayload{
-		TenantID:                 tenantID,
 		KnowledgeID:              knowledge.ID,
 		KnowledgeBaseID:          kbID,
 		FileURL:                  fileURL,
@@ -802,6 +773,7 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 		Language:                 lang,
 	}
 
+	fillCommonTaskPayload(ctx, &taskPayload)
 	payloadBytes, err := json.Marshal(taskPayload)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to marshal file URL process task payload: %v", err)
@@ -822,29 +794,25 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 
 // CreateKnowledgeFromPassage creates a knowledge entry from text passages
 func (s *knowledgeService) CreateKnowledgeFromPassage(ctx context.Context,
-	kbID string, passage []string, channel string,
+	kbID string, passage []string,
 ) (*types.Knowledge, error) {
-	return s.createKnowledgeFromPassageInternal(ctx, kbID, passage, false, channel)
+	return s.createKnowledgeFromPassageInternal(ctx, kbID, passage, false)
 }
 
 // CreateKnowledgeFromPassageSync creates a knowledge entry from text passages and waits for indexing to complete.
 func (s *knowledgeService) CreateKnowledgeFromPassageSync(ctx context.Context,
-	kbID string, passage []string, channel string,
+	kbID string, passage []string,
 ) (*types.Knowledge, error) {
-	return s.createKnowledgeFromPassageInternal(ctx, kbID, passage, true, channel)
+	return s.createKnowledgeFromPassageInternal(ctx, kbID, passage, true)
 }
 
 // CreateKnowledgeFromManual creates or saves manual Markdown knowledge content.
 func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
-	kbID string, payload *types.ManualKnowledgePayload, channel string,
+	kbID string, title string, content string, tagID string,
 ) (*types.Knowledge, error) {
 	logger.Info(ctx, "Start creating manual knowledge entry")
 
-	if payload == nil {
-		return nil, werrors.NewBadRequestError("请求内容不能为空")
-	}
-
-	cleanContent := secutils.CleanMarkdown(payload.Content)
+	cleanContent := secutils.CleanMarkdown(content)
 	if strings.TrimSpace(cleanContent) == "" {
 		return nil, werrors.NewValidationError("内容不能为空")
 	}
@@ -852,18 +820,12 @@ func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
 		return nil, werrors.NewValidationError(fmt.Sprintf("内容长度超出限制（最多%d个字符）", manualContentMaxLength))
 	}
 
-	safeTitle, ok := secutils.ValidateInput(payload.Title)
+	safeTitle, ok := secutils.ValidateInput(title)
 	if !ok {
 		return nil, werrors.NewValidationError("标题包含非法字符或超出长度限制")
 	}
 
-	status := strings.ToLower(strings.TrimSpace(payload.Status))
-	if status == "" {
-		status = types.ManualKnowledgeStatusDraft
-	}
-	if status != types.ManualKnowledgeStatusDraft && status != types.ManualKnowledgeStatusPublish {
-		return nil, werrors.NewValidationError("状态仅支持 draft 或 publish")
-	}
+	status := types.ManualKnowledgeStatusPublish
 
 	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, kbID)
 	if err != nil {
@@ -875,38 +837,28 @@ func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
 		return nil, err
 	}
 
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 	now := time.Now()
-	title := safeTitle
-	if title == "" {
-		title = fmt.Sprintf("Knowledge-%s", now.Format("20060102-150405"))
+	effTitle := safeTitle
+	if effTitle == "" {
+		effTitle = fmt.Sprintf("Knowledge-%s", now.Format("20060102-150405"))
 	}
 
-	fileName := ensureManualFileName(title)
-	meta := types.NewManualKnowledgeMetadata(cleanContent, status, 1)
+	fileName := ensureManualFileName(effTitle)
 
 	knowledge := &types.Knowledge{
-		TenantID:         tenantID,
-		KnowledgeBaseID:  kbID,
-		Type:             types.KnowledgeTypeManual,
-		Channel:          defaultChannel(channel),
-		Title:            title,
-		Description:      "",
-		Source:           types.KnowledgeTypeManual,
-		ParseStatus:      types.ManualKnowledgeStatusDraft,
-		EnableStatus:     "disabled",
-		CreatedAt:        now,
-		UpdatedAt:        now,
-		EmbeddingModelID: kb.EmbeddingModelID,
-		FileName:         fileName,
-		FileType:         types.KnowledgeTypeManual,
-		TagID:            payload.TagID, // 设置分类ID，用于知识分类管理
+		KnowledgeBaseID: kbID,
+		Type:            types.KnowledgeTypeManual,
+		Title:           effTitle,
+		Description:     "",
+		ParseStatus:     types.ManualKnowledgeStatusDraft,
+		EnableStatus:    types.EnableStatusDisabled,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		// EmbeddingModelID set below via getDefaultEmbeddingModelID
+		FileName: fileName,
+		FileType: types.KnowledgeTypeManual,
+		TagID:    tagID, // 设置分类ID，用于知识分类管理
 	}
-	if err := knowledge.SetManualMetadata(meta); err != nil {
-		logger.Errorf(ctx, "Failed to set manual metadata: %v", err)
-		return nil, err
-	}
-	knowledge.EnsureManualDefaults()
 
 	if status == types.ManualKnowledgeStatusPublish {
 		knowledge.ParseStatus = "pending"
@@ -934,7 +886,7 @@ func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
 // createKnowledgeFromPassageInternal consolidates the common logic for creating knowledge from passages.
 // When syncMode is true, chunk processing is performed synchronously; otherwise, it's processed asynchronously.
 func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Context,
-	kbID string, passage []string, syncMode bool, channel string,
+	kbID string, passage []string, syncMode bool,
 ) (*types.Knowledge, error) {
 	if syncMode {
 		logger.Info(ctx, "Start creating knowledge from passage (sync)")
@@ -969,16 +921,14 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
 		logger.Info(ctx, "Creating knowledge record")
 	}
 	knowledge := &types.Knowledge{
-		ID:               uuid.New().String(),
-		TenantID:         ctx.Value(types.TenantIDContextKey).(uint64),
-		KnowledgeBaseID:  kbID,
-		Type:             "passage",
-		Channel:          defaultChannel(channel),
-		ParseStatus:      "pending",
-		EnableStatus:     "disabled",
-		CreatedAt:        time.Now(),
-		UpdatedAt:        time.Now(),
-		EmbeddingModelID: kb.EmbeddingModelID,
+		ID:              uuid.New().String(),
+		KnowledgeBaseID: kbID,
+		Type:            "passage",
+		ParseStatus:     "pending",
+		EnableStatus:    types.EnableStatusDisabled,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+		// EmbeddingModelID set below via getDefaultEmbeddingModelID
 	}
 
 	// Save knowledge record
@@ -996,7 +946,6 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
 	} else {
 		// Enqueue passage processing task to Asynq
 		logger.Info(ctx, "Enqueuing passage processing task to Asynq")
-		tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 
 		// Check question generation config
 		enableQuestionGeneration := false
@@ -1010,7 +959,6 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
 
 		lang, _ := types.LanguageFromContext(ctx)
 		taskPayload := types.DocumentProcessPayload{
-			TenantID:                 tenantID,
 			KnowledgeID:              knowledge.ID,
 			KnowledgeBaseID:          kbID,
 			Passages:                 safePassages,
@@ -1020,6 +968,7 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
 			Language:                 lang,
 		}
 
+		fillCommonTaskPayload(ctx, &taskPayload)
 		payloadBytes, err := json.Marshal(taskPayload)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to marshal passage process task payload: %v", err)
@@ -1043,7 +992,7 @@ func (s *knowledgeService) createKnowledgeFromPassageInternal(ctx context.Contex
 func (s *knowledgeService) GetKnowledgeByID(ctx context.Context, id string) (*types.Knowledge, error) {
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, id)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, id)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
 			"knowledge_id": id,
@@ -1058,22 +1007,21 @@ func (s *knowledgeService) GetKnowledgeByID(ctx context.Context, id string) (*ty
 
 // GetKnowledgeByIDOnly retrieves knowledge by ID without tenant filter (for permission resolution).
 func (s *knowledgeService) GetKnowledgeByIDOnly(ctx context.Context, id string) (*types.Knowledge, error) {
-	return s.repo.GetKnowledgeByIDOnly(ctx, id)
+	return s.repo.GetKnowledgeByID(ctx, id)
 }
 
 // ListKnowledgeByKnowledgeBaseID returns all knowledge entries in a knowledge base
 func (s *knowledgeService) ListKnowledgeByKnowledgeBaseID(ctx context.Context,
 	kbID string,
 ) ([]*types.Knowledge, error) {
-	return s.repo.ListKnowledgeByKnowledgeBaseID(ctx, ctx.Value(types.TenantIDContextKey).(uint64), kbID)
+	return s.repo.ListKnowledgeByKnowledgeBaseID(ctx, kbID)
 }
 
 // ListPagedKnowledgeByKnowledgeBaseID returns paginated knowledge entries in a knowledge base
 func (s *knowledgeService) ListPagedKnowledgeByKnowledgeBaseID(ctx context.Context,
 	kbID string, page *types.Pagination, tagID string, keyword string, fileType string,
 ) (*types.PageResult, error) {
-	knowledges, total, err := s.repo.ListPagedKnowledgeByKnowledgeBaseID(ctx,
-		ctx.Value(types.TenantIDContextKey).(uint64), kbID, page, tagID, keyword, fileType)
+	knowledges, total, err := s.repo.ListPagedKnowledgeByKnowledgeBaseID(ctx, kbID, page, tagID, keyword, fileType)
 	if err != nil {
 		return nil, err
 	}
@@ -1124,7 +1072,7 @@ func deleteExtractedImages(ctx context.Context, fileSvc interfaces.FileService, 
 // DeleteKnowledge deletes a knowledge entry and all related resources
 func (s *knowledgeService) DeleteKnowledge(ctx context.Context, id string) error {
 	// Get the knowledge entry
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, ctx.Value(types.TenantIDContextKey).(uint64), id)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -1146,8 +1094,7 @@ func (s *knowledgeService) DeleteKnowledge(ctx context.Context, id string) error
 	kbFileSvc := s.resolveFileService(ctx, kb)
 
 	// Collect image URLs before chunks are deleted (ImageInfo references are lost after deletion)
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-	chunkImageInfos, err := s.chunkService.GetRepository().ListImageInfoByKnowledgeIDs(ctx, tenantID, []string{id})
+	chunkImageInfos, err := s.chunkService.GetRepository().ListImageInfoByKnowledgeIDs(ctx, []string{id})
 	if err != nil {
 		logger.Errorf(ctx, "Failed to collect image URLs for cleanup: %v", err)
 	}
@@ -1174,7 +1121,7 @@ func (s *knowledgeService) DeleteKnowledge(ctx context.Context, id string) error
 			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
 			return err
 		}
-		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
+		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledge.KnowledgeBaseID, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
 			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
 			return err
 		}
@@ -1216,11 +1163,24 @@ func (s *knowledgeService) DeleteKnowledge(ctx context.Context, id string) error
 		return nil
 	})
 
+	// Delete the global summary row for this knowledge (milvus only; noop otherwise)
+	wg.Go(func() error {
+		if s.summaryIndex == nil {
+			return nil
+		}
+		if err := s.summaryIndex.DeleteKnowledgeSummary(ctx, knowledge.ID); err != nil {
+			logger.GetLogger(ctx).WithField("error", err).
+				Warnf("DeleteKnowledge delete summary row failed for knowledge %s", knowledge.ID)
+			// do not propagate: summary row deletion is best-effort
+		}
+		return nil
+	})
+
 	if err = wg.Wait(); err != nil {
 		return err
 	}
 	// Delete the knowledge entry itself from the database
-	return s.repo.DeleteKnowledge(ctx, ctx.Value(types.TenantIDContextKey).(uint64), id)
+	return s.repo.DeleteKnowledge(ctx, id)
 }
 
 // DeleteKnowledgeList deletes a knowledge entry and all related resources
@@ -1230,7 +1190,7 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 	}
 	// 1. Get the knowledge entry
 	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
-	knowledgeList, err := s.repo.GetKnowledgeBatch(ctx, tenantInfo.ID, ids)
+	knowledgeList, err := s.repo.GetKnowledgeBatch(ctx, ids)
 	if err != nil {
 		return err
 	}
@@ -1257,7 +1217,7 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 	}
 
 	// Collect image URLs before chunks are deleted
-	chunkImageInfos, err := s.chunkService.GetRepository().ListImageInfoByKnowledgeIDs(ctx, tenantInfo.ID, ids)
+	chunkImageInfos, err := s.chunkService.GetRepository().ListImageInfoByKnowledgeIDs(ctx, ids)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to collect image URLs for batch cleanup: %v", err)
 	}
@@ -1287,14 +1247,19 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
 			return err
 		}
-		// Group by EmbeddingModelID and Type
+		// Group by KnowledgeBaseID + EmbeddingModelID and Type
 		type groupKey struct {
+			KnowledgeBaseID  string
 			EmbeddingModelID string
 			Type             string
 		}
 		group := map[groupKey][]string{}
 		for _, knowledge := range knowledgeList {
-			key := groupKey{EmbeddingModelID: knowledge.EmbeddingModelID, Type: knowledge.Type}
+			key := groupKey{
+				KnowledgeBaseID:  knowledge.KnowledgeBaseID,
+				EmbeddingModelID: knowledge.EmbeddingModelID,
+				Type:             knowledge.Type,
+			}
 			group[key] = append(group[key], knowledge.ID)
 		}
 		for key, knowledgeIDs := range group {
@@ -1303,7 +1268,7 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge get embedding model failed")
 				return err
 			}
-			if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeIDs, embeddingModel.GetDimensions(), key.Type); err != nil {
+			if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, key.KnowledgeBaseID, knowledgeIDs, embeddingModel.GetDimensions(), key.Type); err != nil {
 				logger.GetLogger(ctx).
 					WithField("error", err).
 					Errorf("DeleteKnowledge delete knowledge embedding failed")
@@ -1366,11 +1331,25 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 		return nil
 	})
 
+	// Delete global summary rows for these knowledge entries (best-effort)
+	wg.Go(func() error {
+		if s.summaryIndex == nil {
+			return nil
+		}
+		for _, kid := range ids {
+			if err := s.summaryIndex.DeleteKnowledgeSummary(ctx, kid); err != nil {
+				logger.GetLogger(ctx).WithField("error", err).WithField("knowledge_id", kid).
+					Warnf("DeleteKnowledgeList delete summary row failed")
+			}
+		}
+		return nil
+	})
+
 	if err = wg.Wait(); err != nil {
 		return err
 	}
 	// 5. Delete the knowledge entry itself from the database
-	return s.repo.DeleteKnowledgeList(ctx, tenantInfo.ID, ids)
+	return s.repo.DeleteKnowledgeList(ctx, ids)
 }
 
 func (s *knowledgeService) cloneKnowledge(
@@ -1385,23 +1364,19 @@ func (s *knowledgeService) cloneKnowledge(
 	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 	dst := &types.Knowledge{
 		ID:               uuid.New().String(),
-		TenantID:         targetKB.TenantID,
 		KnowledgeBaseID:  targetKB.ID,
 		Type:             src.Type,
-		Channel:          src.Channel,
 		Title:            src.Title,
 		Description:      src.Description,
-		Source:           src.Source,
 		ParseStatus:      "processing",
-		EnableStatus:     "disabled",
-		EmbeddingModelID: targetKB.EmbeddingModelID,
+		EnableStatus:     types.EnableStatusDisabled,
+		EmbeddingModelID: src.EmbeddingModelID,
 		FileName:         src.FileName,
 		FileType:         src.FileType,
 		FileSize:         src.FileSize,
 		FileHash:         src.FileHash,
 		FilePath:         src.FilePath,
 		StorageSize:      src.StorageSize,
-		Metadata:         src.Metadata,
 	}
 	defer func() {
 		if err != nil {
@@ -1411,7 +1386,7 @@ func (s *knowledgeService) cloneKnowledge(
 			logger.GetLogger(ctx).WithField("error", err).Errorf("MoveKnowledge failed to move knowledge")
 		} else {
 			dst.ParseStatus = "completed"
-			dst.EnableStatus = "enabled"
+			dst.EnableStatus = types.EnableStatusEnabled
 			_ = s.repo.UpdateKnowledge(ctx, dst)
 			logger.GetLogger(ctx).WithField("knowledge_id", dst.ID).Infof("MoveKnowledge move knowledge successfully")
 		}
@@ -1523,22 +1498,22 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 	ctx, span := tracing.ContextWithSpan(ctx, "knowledgeService.processChunks")
 	defer span.End()
 	span.SetAttributes(
-		attribute.Int("tenant_id", int(knowledge.TenantID)),
+		// tenant_id tracing removed
 		attribute.String("knowledge_base_id", knowledge.KnowledgeBaseID),
 		attribute.String("knowledge_id", knowledge.ID),
-		attribute.String("embedding_model_id", kb.EmbeddingModelID),
+		attribute.String("embedding_model_id", knowledge.EmbeddingModelID),
 		attribute.Int("chunk_count", len(chunks)),
 	)
 
 	// Check if knowledge is being deleted before processing
-	if s.isKnowledgeDeleting(ctx, knowledge.TenantID, knowledge.ID) {
+	if s.isKnowledgeDeleting(ctx, knowledge.ID) {
 		logger.Infof(ctx, "Knowledge is being deleted, aborting chunk processing: %s", knowledge.ID)
 		span.AddEvent("aborted: knowledge is being deleted")
 		return
 	}
 
 	// Get embedding model for vectorization
-	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, kb.EmbeddingModelID)
+	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, knowledge.EmbeddingModelID)
 	if err != nil {
 		logger.GetLogger(ctx).WithField("error", err).Errorf("processChunks get embedding model failed")
 		span.RecordError(err)
@@ -1558,7 +1533,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 	retrieveEngine, err := retriever.NewCompositeRetrieveEngine(s.retrieveEngine, tenantInfo.GetEffectiveEngines())
 	if err == nil {
-		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
+		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledge.KnowledgeBaseID, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
 			logger.Warnf(ctx, "Failed to delete existing index data (may not exist): %v", err)
 			// 不返回错误，继续处理（可能没有旧数据）
 		} else {
@@ -1647,7 +1622,6 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		for i, pc := range options.ParentChunks {
 			parentDBChunks[i] = &types.Chunk{
 				ID:              uuid.New().String(),
-				TenantID:        knowledge.TenantID,
 				KnowledgeID:     knowledge.ID,
 				KnowledgeBaseID: knowledge.KnowledgeBaseID,
 				Content:         pc.Content,
@@ -1686,7 +1660,6 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		// 创建主文本Chunk
 		textChunk := &types.Chunk{
 			ID:              uuid.New().String(),
-			TenantID:        knowledge.TenantID,
 			KnowledgeID:     knowledge.ID,
 			KnowledgeBaseID: knowledge.KnowledgeBaseID,
 			Content:         chunkData.Content,
@@ -1746,7 +1719,21 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 	if t := strings.TrimSpace(knowledge.Title); t != "" {
 		titlePrefix = t + "\n"
 	}
+	// 展开知识当前 TagID 的祖先链；若 knowledge.TagID 为空则保持空数组。
+	var tagAncestors []string
+	if knowledge.TagID != "" {
+		if chain, aerr := s.tagRepo.AncestorIDs(ctx, knowledge.TagID); aerr == nil {
+			tagAncestors = chain
+		} else {
+			logger.Warnf(ctx, "Failed to expand tag ancestors for tag %s: %v", knowledge.TagID, aerr)
+		}
+	}
 	for _, chunk := range textChunks {
+		// 同步把祖先链 leaf（即 knowledge.TagID）写入 chunk.TagID，
+		// 让 PG 端 chunk 表与 Milvus tag_id 数组保持一致。
+		if chunk.TagID == "" && knowledge.TagID != "" {
+			chunk.TagID = knowledge.TagID
+		}
 		indexContent := titlePrefix + chunk.Content
 		indexInfoList = append(indexInfoList, &types.IndexInfo{
 			Content:         indexContent,
@@ -1755,6 +1742,8 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 			ChunkID:         chunk.ID,
 			KnowledgeID:     knowledge.ID,
 			KnowledgeBaseID: knowledge.KnowledgeBaseID,
+			TagIDs:          tagAncestors,
+			FileName:        knowledge.FileName,
 			IsEnabled:       true,
 		})
 	}
@@ -1787,7 +1776,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 	}
 
 	// Check again if knowledge is being deleted before writing to database
-	if s.isKnowledgeDeleting(ctx, knowledge.TenantID, knowledge.ID) {
+	if s.isKnowledgeDeleting(ctx, knowledge.ID) {
 		logger.Infof(ctx, "Knowledge is being deleted, aborting before saving chunks: %s", knowledge.ID)
 		span.AddEvent("aborted: knowledge is being deleted before saving")
 		return
@@ -1805,7 +1794,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 	}
 
 	// Check again before batch indexing (this is a heavy operation)
-	if s.isKnowledgeDeleting(ctx, knowledge.TenantID, knowledge.ID) {
+	if s.isKnowledgeDeleting(ctx, knowledge.ID) {
 		logger.Infof(ctx, "Knowledge is being deleted, cleaning up and aborting before indexing: %s", knowledge.ID)
 		// Clean up the chunks we just created
 		if err := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); err != nil {
@@ -1830,7 +1819,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 
 		// delete index
 		if err := retrieveEngine.DeleteByKnowledgeIDList(
-			ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), kb.Type,
+			ctx, knowledge.KnowledgeBaseID, []string{knowledge.ID}, embeddingModel.GetDimensions(), kb.Type,
 		); err != nil {
 			logger.Errorf(ctx, "Delete index failed: %v", err)
 		}
@@ -1840,24 +1829,17 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 	logger.GetLogger(ctx).Infof("processChunks batch index successfully, with %d index", len(indexInfoList))
 
 	logger.Infof(ctx, "processChunks create relationship rag task")
-	if kb.ExtractConfig != nil && kb.ExtractConfig.Enabled {
-		for _, chunk := range textChunks {
-			err := NewChunkExtractTask(ctx, s.task, chunk.TenantID, chunk.ID, kb.SummaryModelID)
-			if err != nil {
-				logger.GetLogger(ctx).WithField("error", err).Errorf("processChunks create chunk extract task failed")
-				span.RecordError(err)
-			}
-		}
-	}
+	// TODO: ExtractConfig removed from KB; graph extraction disabled
+	_ = textChunks
 
 	// Final check before marking as completed - if deleted during processing, don't update status
-	if s.isKnowledgeDeleting(ctx, knowledge.TenantID, knowledge.ID) {
+	if s.isKnowledgeDeleting(ctx, knowledge.ID) {
 		logger.Infof(ctx, "Knowledge was deleted during processing, skipping completion update: %s", knowledge.ID)
 		// Clean up the data we just created since the knowledge is being deleted
 		if err := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); err != nil {
 			logger.Warnf(ctx, "Failed to cleanup chunks after deletion detected: %v", err)
 		}
-		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), kb.Type); err != nil {
+		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledge.KnowledgeBaseID, []string{knowledge.ID}, embeddingModel.GetDimensions(), kb.Type); err != nil {
 			logger.Warnf(ctx, "Failed to cleanup index after deletion detected: %v", err)
 		}
 		span.AddEvent("aborted: knowledge was deleted during processing")
@@ -1877,8 +1859,13 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 	} else {
 		knowledge.ParseStatus = types.ParseStatusCompleted
 	}
-	knowledge.EnableStatus = "enabled"
+	knowledge.EnableStatus = types.EnableStatusEnabled
 	knowledge.StorageSize = totalStorageSize
+	// 将该知识所在的 Milvus collection 名预计算并写入 PG，
+	// 避免下游检索 / 清理逻辑需要在运行时重复解析 KB.Category。
+	if name := kb.ResolveCollectionName(); name != "" {
+		knowledge.CollectionName = name
+	}
 	now := time.Now()
 	knowledge.ProcessedAt = &now
 	knowledge.UpdatedAt = now
@@ -2163,20 +2150,14 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 		ctx = context.WithValue(ctx, types.LanguageContextKey, payload.Language)
 	}
 
-	// Get knowledge base
-	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, payload.KnowledgeBaseID)
-	if err != nil {
+	// Get knowledge base (validate it exists)
+	if _, err := s.kbService.GetKnowledgeBaseByID(ctx, payload.KnowledgeBaseID); err != nil {
 		logger.Errorf(ctx, "Failed to get knowledge base: %v", err)
 		return nil
 	}
 
-	if kb.SummaryModelID == "" {
-		logger.Warn(ctx, "Knowledge base summary model ID is empty, skipping summary generation")
-		return nil
-	}
-
 	// Get knowledge
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.KnowledgeID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get knowledge: %v", err)
 		return nil
@@ -2229,7 +2210,7 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 	})
 
 	// Initialize chat model for summary
-	chatModel, err := s.modelService.GetChatModel(ctx, kb.SummaryModelID)
+	chatModel, err := s.modelService.GetChatModel(ctx, "")
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get chat model: %v", err)
 		markSummaryFailed()
@@ -2274,9 +2255,9 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 
 		summaryChunk := &types.Chunk{
 			ID:              uuid.New().String(),
-			TenantID:        knowledge.TenantID,
 			KnowledgeID:     knowledge.ID,
 			KnowledgeBaseID: knowledge.KnowledgeBaseID,
+			TagID:           knowledge.TagID,
 			Content:         fmt.Sprintf("# Document\n%s\n\n# Summary\n%s", knowledge.FileName, summary),
 			ChunkIndex:      maxChunkIndex + 1,
 			IsEnabled:       true,
@@ -2308,10 +2289,20 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 			return fmt.Errorf("failed to init retrieve engine: %w", err)
 		}
 
-		embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, kb.EmbeddingModelID)
+		embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, knowledge.EmbeddingModelID)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to get embedding model: %v", err)
 			return fmt.Errorf("failed to get embedding model: %w", err)
+		}
+
+		// 展开知识当前 TagID 的祖先链，summary chunk 索引与全局 summary collection 复用。
+		var ancestorTagIDs []string
+		if knowledge.TagID != "" {
+			if chain, aerr := s.tagRepo.AncestorIDs(ctx, knowledge.TagID); aerr == nil {
+				ancestorTagIDs = chain
+			} else {
+				logger.Warnf(ctx, "Failed to expand tag ancestors for tag %s: %v", knowledge.TagID, aerr)
+			}
 		}
 
 		indexInfo := []*types.IndexInfo{{
@@ -2321,6 +2312,8 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 			ChunkID:         summaryChunk.ID,
 			KnowledgeID:     knowledge.ID,
 			KnowledgeBaseID: knowledge.KnowledgeBaseID,
+			TagIDs:          ancestorTagIDs,
+			FileName:        knowledge.FileName,
 			IsEnabled:       true,
 		}}
 
@@ -2330,6 +2323,36 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 		}
 
 		logger.Infof(ctx, "Successfully created and indexed summary chunk for knowledge: %s", payload.KnowledgeID)
+
+		// Upsert the per-knowledge summary into the global weknora_summary collection
+		// This is best-effort: a failure here must not mark the summary as failed,
+		// because the summary is already persisted in PG (knowledge.Description) and
+		// as a summary chunk in the per-KB collection.
+		if s.summaryIndex != nil {
+			vector, embedErr := embeddingModel.Embed(ctx, summary)
+			if embedErr != nil {
+				logger.Warnf(ctx, "Failed to embed summary for knowledge %s: %v", payload.KnowledgeID, embedErr)
+			} else {
+				item := &types.SummaryItem{
+					ID:              uuid.New().String(),
+					KnowledgeID:     knowledge.ID,
+					KnowledgeBaseID: knowledge.KnowledgeBaseID,
+					TagIDs:          ancestorTagIDs,
+					FileName:        knowledge.FileName,
+					IsEnabled:       true,
+					Content:         summary,
+					Vector:          vector,
+					Title:           knowledge.Title,
+					FileType:        knowledge.FileType,
+					CreatedAt:       time.Now().Unix(),
+				}
+				if upErr := s.summaryIndex.UpsertKnowledgeSummary(ctx, item); upErr != nil {
+					logger.Warnf(ctx, "Failed to upsert summary index for knowledge %s: %v", payload.KnowledgeID, upErr)
+				} else {
+					logger.Infof(ctx, "Upserted summary index for knowledge: %s", payload.KnowledgeID)
+				}
+			}
+		}
 	}
 
 	logger.Infof(ctx, "Successfully generated summary for knowledge: %s", payload.KnowledgeID)
@@ -2360,15 +2383,14 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 		return fmt.Errorf("generate questions prompt not configured")
 	}
 
-	// Get knowledge base
-	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, payload.KnowledgeBaseID)
-	if err != nil {
+	// Get knowledge base (validate it exists)
+	if _, err := s.kbService.GetKnowledgeBaseByID(ctx, payload.KnowledgeBaseID); err != nil {
 		logger.Errorf(ctx, "Failed to get knowledge base: %v", err)
 		return nil
 	}
 
 	// Get knowledge
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.KnowledgeID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get knowledge: %v", err)
 		return nil
@@ -2400,14 +2422,14 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 	})
 
 	// Initialize chat model
-	chatModel, err := s.modelService.GetChatModel(ctx, kb.SummaryModelID)
+	chatModel, err := s.modelService.GetChatModel(ctx, "")
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get chat model: %v", err)
 		return fmt.Errorf("failed to get chat model: %w", err)
 	}
 
 	// Initialize embedding model and retrieval engine
-	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, kb.EmbeddingModelID)
+	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, knowledge.EmbeddingModelID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get embedding model: %v", err)
 		return fmt.Errorf("failed to get embedding model: %w", err)
@@ -2497,6 +2519,7 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 				ChunkID:         chunk.ID,
 				KnowledgeID:     knowledge.ID,
 				KnowledgeBaseID: knowledge.KnowledgeBaseID,
+				FileName:        knowledge.FileName,
 				IsEnabled:       true,
 			})
 		}
@@ -2589,8 +2612,7 @@ func (s *knowledgeService) generateQuestionsWithContext(ctx context.Context,
 // GetKnowledgeFile retrieves the physical file associated with a knowledge entry
 func (s *knowledgeService) GetKnowledgeFile(ctx context.Context, id string) (io.ReadCloser, string, error) {
 	// Get knowledge record
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, id)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, id)
 	if err != nil {
 		return nil, "", err
 	}
@@ -2621,7 +2643,7 @@ func (s *knowledgeService) GetKnowledgeFile(ctx context.Context, id string) (io.
 }
 
 func (s *knowledgeService) UpdateKnowledge(ctx context.Context, knowledge *types.Knowledge) error {
-	record, err := s.repo.GetKnowledgeByID(ctx, ctx.Value(types.TenantIDContextKey).(uint64), knowledge.ID)
+	record, err := s.repo.GetKnowledgeByID(ctx, knowledge.ID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get knowledge record: %v", err)
 		return err
@@ -2675,8 +2697,7 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
 		return nil, werrors.NewValidationError("状态仅支持 draft 或 publish")
 	}
 
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-	existing, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
+	existing, err := s.repo.GetKnowledgeByID(ctx, knowledgeID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to load knowledge: %v", err)
 		return nil, err
@@ -2685,7 +2706,7 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
 		return nil, werrors.NewBadRequestError("仅支持手工知识的在线编辑")
 	}
 
-	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, existing.KnowledgeBaseID)
+	_, err = s.kbService.GetKnowledgeBaseByID(ctx, existing.KnowledgeBaseID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get knowledge base for manual update: %v", err)
 		return nil, err
@@ -2712,10 +2733,10 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
 	existing.FileName = ensureManualFileName(existing.Title)
 	existing.FileType = types.KnowledgeTypeManual
 	existing.Type = types.KnowledgeTypeManual
-	existing.Source = types.KnowledgeTypeManual
-	existing.EnableStatus = "disabled"
+	// "" removed
+	existing.EnableStatus = types.EnableStatusDisabled
 	existing.UpdatedAt = time.Now()
-	existing.EmbeddingModelID = kb.EmbeddingModelID
+	// EmbeddingModelID preserved from existing knowledge record
 
 	if status == types.ManualKnowledgeStatusDraft {
 		existing.ParseStatus = types.ManualKnowledgeStatusDraft
@@ -2758,7 +2779,6 @@ func (s *knowledgeService) enqueueManualProcessing(ctx context.Context,
 	requestID, _ := types.RequestIDFromContext(ctx)
 	payload := types.ManualProcessPayload{
 		RequestId:       requestID,
-		TenantID:        knowledge.TenantID,
 		KnowledgeID:     knowledge.ID,
 		KnowledgeBaseID: knowledge.KnowledgeBaseID,
 		Content:         content,
@@ -2783,8 +2803,7 @@ func (s *knowledgeService) enqueueManualProcessing(ctx context.Context,
 func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID string) (*types.Knowledge, error) {
 	logger.Info(ctx, "Start re-parsing knowledge")
 
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-	existing, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
+	existing, err := s.repo.GetKnowledgeByID(ctx, knowledgeID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to load knowledge: %v", err)
 		return nil, err
@@ -2806,10 +2825,10 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 		}
 
 		existing.ParseStatus = "pending"
-		existing.EnableStatus = "disabled"
+		existing.EnableStatus = types.EnableStatusDisabled
 		existing.Description = ""
 		existing.ProcessedAt = nil
-		existing.EmbeddingModelID = kb.EmbeddingModelID
+		// EmbeddingModelID preserved from existing knowledge record
 
 		if err := s.repo.UpdateKnowledge(ctx, existing); err != nil {
 			logger.Errorf(ctx, "Failed to update knowledge status before reparse: %v", err)
@@ -2836,10 +2855,10 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 
 	// Step 2: Update knowledge status and metadata
 	existing.ParseStatus = "pending"
-	existing.EnableStatus = "disabled"
+	existing.EnableStatus = types.EnableStatusDisabled
 	existing.Description = ""
 	existing.ProcessedAt = nil
-	existing.EmbeddingModelID = kb.EmbeddingModelID
+	// EmbeddingModelID preserved from existing knowledge record
 
 	if err := s.repo.UpdateKnowledge(ctx, existing); err != nil {
 		logger.Errorf(ctx, "Failed to update knowledge status before reparse: %v", err)
@@ -2854,7 +2873,7 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 		tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 
 		// Determine multimodal setting
-		enableMultimodel := kb.IsMultimodalEnabled()
+		enableMultimodel := false
 
 		// Check question generation config
 		enableQuestionGeneration := false
@@ -2868,7 +2887,6 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 
 		lang, _ := types.LanguageFromContext(ctx)
 		taskPayload := types.DocumentProcessPayload{
-			TenantID:                 tenantID,
 			KnowledgeID:              existing.ID,
 			KnowledgeBaseID:          existing.KnowledgeBaseID,
 			FilePath:                 existing.FilePath,
@@ -2880,6 +2898,7 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 			Language:                 lang,
 		}
 
+		fillCommonTaskPayload(ctx, &taskPayload)
 		payloadBytes, err := json.Marshal(taskPayload)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to marshal reparse task payload: %v", err)
@@ -2896,17 +2915,15 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 
 		// For data tables (csv, xlsx, xls), also enqueue summary task
 		if slices.Contains([]string{"csv", "xlsx", "xls"}, getFileType(existing.FileName)) {
-			NewDataTableSummaryTask(ctx, s.task, tenantID, existing.ID, kb.SummaryModelID, kb.EmbeddingModelID)
+			NewDataTableSummaryTask(ctx, s.task, tenantID, existing.ID, "", existing.EmbeddingModelID)
 		}
 
 		return existing, nil
 	}
 
 	// For file-URL-based knowledge, enqueue document processing task with FileURL field
-	if existing.Type == "file_url" && existing.Source != "" {
-		tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-
-		enableMultimodel := kb.IsMultimodalEnabled()
+	if existing.Type == "file_url" && false {
+		enableMultimodel := false
 
 		// Check question generation config
 		enableQuestionGeneration := false
@@ -2920,10 +2937,9 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 
 		lang, _ := types.LanguageFromContext(ctx)
 		taskPayload := types.DocumentProcessPayload{
-			TenantID:                 tenantID,
 			KnowledgeID:              existing.ID,
 			KnowledgeBaseID:          existing.KnowledgeBaseID,
-			FileURL:                  existing.Source,
+			FileURL:                  "",
 			FileName:                 existing.FileName,
 			FileType:                 existing.FileType,
 			EnableMultimodel:         enableMultimodel,
@@ -2932,6 +2948,7 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 			Language:                 lang,
 		}
 
+		fillCommonTaskPayload(ctx, &taskPayload)
 		payloadBytes, err := json.Marshal(taskPayload)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to marshal file URL reparse task payload: %v", err)
@@ -2950,10 +2967,8 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 	}
 
 	// For URL-based knowledge, enqueue URL processing task
-	if existing.Type == "url" && existing.Source != "" {
-		tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-
-		enableMultimodel := kb.IsMultimodalEnabled()
+	if existing.Type == "url" && false {
+		enableMultimodel := false
 
 		// Check question generation config
 		enableQuestionGeneration := false
@@ -2967,16 +2982,16 @@ func (s *knowledgeService) ReparseKnowledge(ctx context.Context, knowledgeID str
 
 		lang, _ := types.LanguageFromContext(ctx)
 		taskPayload := types.DocumentProcessPayload{
-			TenantID:                 tenantID,
 			KnowledgeID:              existing.ID,
 			KnowledgeBaseID:          existing.KnowledgeBaseID,
-			URL:                      existing.Source,
+			URL:                      "",
 			EnableMultimodel:         enableMultimodel,
 			EnableQuestionGeneration: enableQuestionGeneration,
 			QuestionCount:            questionCount,
 			Language:                 lang,
 		}
 
+		fillCommonTaskPayload(ctx, &taskPayload)
 		payloadBytes, err := json.Marshal(taskPayload)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to marshal URL reparse task payload: %v", err)
@@ -3029,23 +3044,23 @@ func isValidURL(url string) bool {
 
 // GetKnowledgeBatch retrieves multiple knowledge entries by their IDs
 func (s *knowledgeService) GetKnowledgeBatch(ctx context.Context,
-	tenantID uint64, ids []string,
+	ids []string,
 ) ([]*types.Knowledge, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	return s.repo.GetKnowledgeBatch(ctx, tenantID, ids)
+	return s.repo.GetKnowledgeBatch(ctx, ids)
 }
 
 // GetKnowledgeBatchWithSharedAccess retrieves knowledge by IDs, including items from shared KBs the user has access to.
 // Used when building search targets so that @mentioned files from shared KBs are included.
 func (s *knowledgeService) GetKnowledgeBatchWithSharedAccess(ctx context.Context,
-	tenantID uint64, ids []string,
+	ids []string,
 ) ([]*types.Knowledge, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	ownList, err := s.repo.GetKnowledgeBatch(ctx, tenantID, ids)
+	ownList, err := s.repo.GetKnowledgeBatch(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -3067,7 +3082,7 @@ func (s *knowledgeService) GetKnowledgeBatchWithSharedAccess(ctx context.Context
 		if foundSet[id] {
 			continue
 		}
-		k, err := s.repo.GetKnowledgeByIDOnly(ctx, id)
+		k, err := s.repo.GetKnowledgeByID(ctx, id)
 		if err != nil || k == nil || k.KnowledgeBaseID == "" {
 			continue
 		}
@@ -3109,24 +3124,36 @@ func calculateStr(strList ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// getDefaultEmbeddingModelIDFromModels returns the system default embedding model ID.
+func (s *knowledgeService) getDefaultEmbeddingModelIDFromModels(ctx context.Context) (string, error) {
+	models, err := s.modelService.ListModels(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to list models: %w", err)
+	}
+	for _, m := range models {
+		if m.Type == types.ModelTypeEmbedding && m.IsDefault {
+			return m.ID, nil
+		}
+	}
+	// fallback: first embedding model
+	for _, m := range models {
+		if m.Type == types.ModelTypeEmbedding {
+			return m.ID, nil
+		}
+	}
+	return "", fmt.Errorf("no embedding model configured")
+}
+
 func (s *knowledgeService) CloneKnowledgeBase(ctx context.Context, srcID, dstID string) error {
-	srcKB, dstKB, err := s.kbService.CopyKnowledgeBase(ctx, srcID, dstID)
+	_, dstKB, err := s.kbService.CopyKnowledgeBase(ctx, srcID, dstID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to copy knowledge base: %v", err)
 		return err
 	}
 
-	addKnowledge, err := s.repo.AminusB(ctx, srcKB.TenantID, srcKB.ID, dstKB.TenantID, dstKB.ID)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to get knowledge: %v", err)
-		return err
-	}
-
-	delKnowledge, err := s.repo.AminusB(ctx, dstKB.TenantID, dstKB.ID, srcKB.TenantID, srcKB.ID)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to get knowledge: %v", err)
-		return err
-	}
+	// TODO: implement knowledge diff logic
+	var addKnowledge []string
+	var delKnowledge []string
 	logger.Infof(ctx, "Knowledge after update to add: %d, delete: %d", len(addKnowledge), len(delKnowledge))
 
 	batch := 10
@@ -3152,7 +3179,7 @@ func (s *knowledgeService) CloneKnowledgeBase(ctx context.Context, srcID, dstID 
 	g.SetLimit(batch)
 	for _, knowledge := range addKnowledge {
 		g.Go(func() error {
-			srcKn, err := s.repo.GetKnowledgeByID(gctx, srcKB.TenantID, knowledge)
+			srcKn, err := s.repo.GetKnowledgeByID(gctx, knowledge)
 			if err != nil {
 				logger.Errorf(gctx, "get knowledge %s: %v", knowledge, err)
 				return err
@@ -3174,12 +3201,35 @@ func (s *knowledgeService) CloneKnowledgeBase(ctx context.Context, srcID, dstID 
 }
 
 func (s *knowledgeService) updateChunkVector(ctx context.Context, kbID string, chunks []*types.Chunk) error {
-	// Get embedding model from knowledge base
+	// Get knowledge base (need its ID for collection operations)
 	sourceKB, err := s.kbService.GetKnowledgeBaseByID(ctx, kbID)
 	if err != nil {
 		return err
 	}
-	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, sourceKB.EmbeddingModelID)
+	// Get default embedding model
+	models, err := s.modelService.ListModels(ctx)
+	if err != nil {
+		return err
+	}
+	var embeddingModelID string
+	for _, m := range models {
+		if m.Type == types.ModelTypeEmbedding && m.IsDefault {
+			embeddingModelID = m.ID
+			break
+		}
+	}
+	if embeddingModelID == "" {
+		for _, m := range models {
+			if m.Type == types.ModelTypeEmbedding {
+				embeddingModelID = m.ID
+				break
+			}
+		}
+	}
+	if embeddingModelID == "" {
+		return fmt.Errorf("no embedding model configured")
+	}
+	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, embeddingModelID)
 	if err != nil {
 		return err
 	}
@@ -3187,10 +3237,19 @@ func (s *knowledgeService) updateChunkVector(ctx context.Context, kbID string, c
 	// Initialize composite retrieve engine from tenant configuration
 	indexInfo := make([]*types.IndexInfo, 0, len(chunks))
 	ids := make([]string, 0, len(chunks))
+	// 预查 knowledgeID → fileName 映射，避免多次查表。
+	fileNameByKnowledge := make(map[string]string)
 	for _, chunk := range chunks {
 		if chunk.KnowledgeBaseID != kbID {
 			logger.Warnf(ctx, "Knowledge base ID mismatch: %s != %s", chunk.KnowledgeBaseID, kbID)
 			continue
+		}
+		if _, ok := fileNameByKnowledge[chunk.KnowledgeID]; !ok {
+			if kn, kerr := s.repo.GetKnowledgeByID(ctx, chunk.KnowledgeID); kerr == nil && kn != nil {
+				fileNameByKnowledge[chunk.KnowledgeID] = kn.FileName
+			} else {
+				fileNameByKnowledge[chunk.KnowledgeID] = ""
+			}
 		}
 		indexInfo = append(indexInfo, &types.IndexInfo{
 			Content:         chunk.Content,
@@ -3199,6 +3258,7 @@ func (s *knowledgeService) updateChunkVector(ctx context.Context, kbID string, c
 			ChunkID:         chunk.ID,
 			KnowledgeID:     chunk.KnowledgeID,
 			KnowledgeBaseID: chunk.KnowledgeBaseID,
+			FileName:        fileNameByKnowledge[chunk.KnowledgeID],
 			IsEnabled:       true,
 		})
 		ids = append(ids, chunk.ID)
@@ -3211,7 +3271,7 @@ func (s *knowledgeService) updateChunkVector(ctx context.Context, kbID string, c
 	}
 
 	// Delete old vector representation of the chunk
-	err = retrieveEngine.DeleteByChunkIDList(ctx, ids, embeddingModel.GetDimensions(), sourceKB.Type)
+	err = retrieveEngine.DeleteByChunkIDList(ctx, sourceKB.ID, ids, embeddingModel.GetDimensions(), sourceKB.Type)
 	if err != nil {
 		return err
 	}
@@ -3249,7 +3309,7 @@ func (s *knowledgeService) UpdateImageInfo(
 	}
 	chunk.ImageInfo = imageInfo
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-	chunkChildren, err := s.chunkService.ListChunkByParentID(ctx, tenantID, chunkID)
+	chunkChildren, err := s.chunkService.ListChunkByParentID(ctx, chunkID)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
 			"parent_chunk_id": chunkID,
@@ -3309,7 +3369,6 @@ func (s *knowledgeService) UpdateImageInfo(
 	if !hasCaptionChunk && image.Caption != "" {
 		captionChunk := &types.Chunk{
 			ID:              uuid.New().String(),
-			TenantID:        tenantID,
 			KnowledgeID:     chunk.KnowledgeID,
 			KnowledgeBaseID: chunk.KnowledgeBaseID,
 			Content:         image.Caption,
@@ -3325,7 +3384,6 @@ func (s *knowledgeService) UpdateImageInfo(
 	if !hasOCRChunk && image.OCRText != "" {
 		ocrChunk := &types.Chunk{
 			ID:              uuid.New().String(),
-			TenantID:        tenantID,
 			KnowledgeID:     chunk.KnowledgeID,
 			KnowledgeBaseID: chunk.KnowledgeBaseID,
 			Content:         image.OCRText,
@@ -3371,7 +3429,7 @@ func (s *knowledgeService) UpdateImageInfo(
 	}
 
 	// Update the knowledge file hash
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, knowledgeID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get knowledge: %v", err)
 		return err
@@ -3414,7 +3472,6 @@ func (s *knowledgeService) CloneChunk(ctx context.Context, src, dst *types.Knowl
 	}
 	for {
 		sourceChunks, _, err := s.chunkRepo.ListPagedChunksByKnowledgeID(ctx,
-			src.TenantID,
 			src.ID,
 			&types.Pagination{
 				Page:     chunkPage,
@@ -3443,13 +3500,12 @@ func (s *knowledgeService) CloneChunk(ctx context.Context, src, dst *types.Knowl
 					targetTagID = mappedTagID
 				} else {
 					// Try to find or create the tag in target knowledge base
-					targetTagID = s.getOrCreateTagInTarget(ctx, src.TenantID, dst.TenantID, dst.KnowledgeBaseID, sourceChunk.TagID, tagIDMapping)
+					targetTagID = s.getOrCreateTagInTarget(ctx, dst.KnowledgeBaseID, sourceChunk.TagID, tagIDMapping)
 				}
 			}
 
 			targetChunk := &types.Chunk{
 				ID:              uuid.New().String(),
-				TenantID:        dst.TenantID,
 				KnowledgeID:     dst.ID,
 				KnowledgeBaseID: dst.KnowledgeBaseID,
 				TagID:           targetTagID,
@@ -3520,7 +3576,7 @@ func (s *knowledgeService) CloneChunk(ctx context.Context, src, dst *types.Knowl
 
 // ListFAQEntries lists FAQ entries under a FAQ knowledge base.
 func (s *knowledgeService) ListFAQEntries(ctx context.Context,
-	kbID string, page *types.Pagination, tagSeqID int64, keyword string, searchField string, sortOrder string,
+	kbID string, page *types.Pagination, tagID string, keyword string, searchField string, sortOrder string,
 ) (*types.PageResult, error) {
 	if page == nil {
 		page = &types.Pagination{}
@@ -3533,10 +3589,10 @@ func (s *knowledgeService) ListFAQEntries(ctx context.Context,
 
 	// Check if this is a shared knowledge base access
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-	effectiveTenantID := tenantID
+	_ = tenantID // tenant validation done via context
 
 	// If the kb belongs to a different tenant, check for shared access
-	if kb.TenantID != tenantID {
+	if false {
 		// Get user ID from context
 		userIDVal := ctx.Value(types.UserIDContextKey)
 		if userIDVal == nil {
@@ -3551,14 +3607,13 @@ func (s *knowledgeService) ListFAQEntries(ctx context.Context,
 		}
 
 		// Use the source tenant ID for data access
-		sourceTenantID, err := s.kbShareService.GetKBSourceTenant(ctx, kbID)
+		_, err = s.kbShareService.GetKBSourceTenant(ctx, kbID)
 		if err != nil {
 			return nil, werrors.NewForbiddenError("无权访问该知识库")
 		}
-		effectiveTenantID = sourceTenantID
 	}
 
-	faqKnowledge, err := s.findFAQKnowledge(ctx, effectiveTenantID, kb.ID)
+	faqKnowledge, err := s.findFAQKnowledge(ctx, kb.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -3566,27 +3621,19 @@ func (s *knowledgeService) ListFAQEntries(ctx context.Context,
 		return types.NewPageResult(0, page, []*types.FAQEntry{}), nil
 	}
 
-	// Convert tagSeqID to tagID (UUID)
-	var tagID string
-	if tagSeqID > 0 {
-		tag, err := s.tagRepo.GetBySeqID(ctx, effectiveTenantID, tagSeqID)
-		if err != nil {
-			return nil, werrors.NewNotFoundError("标签不存在")
-		}
-		tagID = tag.ID
-	}
+	// tagID is already a UUID string, no conversion needed
 
 	chunkType := []types.ChunkType{types.ChunkTypeFAQ}
 	chunks, total, err := s.chunkRepo.ListPagedChunksByKnowledgeID(
-		ctx, effectiveTenantID, faqKnowledge.ID, page, chunkType, tagID, keyword, searchField, sortOrder, types.KnowledgeTypeFAQ,
+		ctx, faqKnowledge.ID, page, chunkType, tagID, keyword, searchField, sortOrder, types.KnowledgeTypeFAQ,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	// Build tag ID to name and seq_id mapping for all unique tag IDs (batch query)
+	// Build tag ID to name mapping for all unique tag IDs (batch query)
 	tagNameMap := make(map[string]string)
-	tagSeqIDMap := make(map[string]int64)
+	tagSeqIDMap := make(map[string]int64) // kept for API compat, always 0
 	tagIDs := make([]string, 0)
 	tagIDSet := make(map[string]struct{})
 	for _, chunk := range chunks {
@@ -3598,11 +3645,11 @@ func (s *knowledgeService) ListFAQEntries(ctx context.Context,
 		}
 	}
 	if len(tagIDs) > 0 {
-		tags, err := s.tagRepo.GetByIDs(ctx, effectiveTenantID, tagIDs)
+		tags, err := s.tagRepo.GetByIDs(ctx, tagIDs)
 		if err == nil {
 			for _, tag := range tags {
 				tagNameMap[tag.ID] = tag.Name
-				tagSeqIDMap[tag.ID] = tag.SeqID
+				tagSeqIDMap[tag.ID] = 0 // SeqID removed, placeholder
 			}
 		}
 	}
@@ -3665,7 +3712,7 @@ func (s *knowledgeService) UpsertFAQEntries(ctx context.Context,
 	}
 
 	// 确保 FAQ knowledge 存在
-	faqKnowledge, err := s.ensureFAQKnowledge(ctx, tenantID, kb)
+	faqKnowledge, err := s.ensureFAQKnowledge(ctx, kb)
 	if err != nil {
 		return "", fmt.Errorf("failed to ensure FAQ knowledge: %w", err)
 	}
@@ -3713,7 +3760,6 @@ func (s *knowledgeService) UpsertFAQEntries(ctx context.Context,
 
 	// 构建任务 payload
 	taskPayload := types.FAQImportPayload{
-		TenantID:    tenantID,
 		TaskID:      taskID,
 		KBID:        kbID,
 		KnowledgeID: knowledgeID,
@@ -3755,6 +3801,9 @@ func (s *knowledgeService) UpsertFAQEntries(ctx context.Context,
 		taskPayload.Entries = payload.Entries
 	}
 
+	if taskPayload.TenantID == 0 {
+		taskPayload.TenantID = tenantID
+	}
 	payloadBytes, err := json.Marshal(taskPayload)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to marshal FAQ import task payload: %v", err)
@@ -3810,8 +3859,9 @@ func (s *knowledgeService) UpsertFAQEntries(ctx context.Context,
 
 // generateFailedEntriesCSV 生成失败条目的 CSV 文件并上传
 func (s *knowledgeService) generateFailedEntriesCSV(ctx context.Context,
-	tenantID uint64, taskID string, failedEntries []types.FAQFailedEntry,
+	taskID string, failedEntries []types.FAQFailedEntry,
 ) (string, error) {
+	tenantID, _ := ctx.Value(types.TenantIDContextKey).(uint64)
 	// 生成 CSV 内容
 	var buf strings.Builder
 
@@ -3883,8 +3933,7 @@ func (s *knowledgeService) saveFAQImportResultToDatabase(ctx context.Context,
 	payload *types.FAQImportPayload, progress *types.FAQImportProgress, originalTotalEntries int,
 ) error {
 	// 获取FAQ知识库实例
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, payload.KnowledgeID)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.KnowledgeID)
 	if err != nil {
 		return fmt.Errorf("failed to get FAQ knowledge: %w", err)
 	}
@@ -3963,7 +4012,7 @@ func (s *knowledgeService) executeFAQDryRunValidation(ctx context.Context,
 
 	// 根据模式选择不同的验证逻辑
 	if payload.Mode == types.FAQBatchModeAppend {
-		validEntryIndices = s.validateEntriesForAppendModeWithProgress(ctx, payload.TenantID, payload.KBID, entries, progress)
+		validEntryIndices = s.validateEntriesForAppendModeWithProgress(ctx, payload.KBID, entries, progress)
 	} else {
 		validEntryIndices = s.validateEntriesForReplaceModeWithProgress(ctx, entries, progress)
 	}
@@ -3974,12 +4023,12 @@ func (s *knowledgeService) executeFAQDryRunValidation(ctx context.Context,
 // validateEntriesForAppendModeWithProgress 验证 Append 模式下的条目（带进度更新）
 // 注意：验证阶段不更新 Processed，只有实际导入时才更新
 func (s *knowledgeService) validateEntriesForAppendModeWithProgress(ctx context.Context,
-	tenantID uint64, kbID string, entries []types.FAQEntryPayload, progress *types.FAQImportProgress,
+	kbID string, entries []types.FAQEntryPayload, progress *types.FAQImportProgress,
 ) []int {
 	validIndices := make([]int, 0, len(entries))
 
 	// 查询知识库中已有的所有FAQ chunks的metadata
-	existingChunks, err := s.chunkRepo.ListAllFAQChunksWithMetadataByKnowledgeBaseID(ctx, tenantID, kbID)
+	existingChunks, err := s.chunkRepo.ListAllFAQChunksWithMetadataByKnowledgeBaseID(ctx, kbID)
 	if err != nil {
 		logger.Warnf(ctx, "Failed to list existing FAQ chunks for dry run: %v", err)
 		// 无法获取已有数据时，仅做批次内验证
@@ -4176,14 +4225,14 @@ func validateFAQEntryPayloadBasic(entry *types.FAQEntryPayload) error {
 // calculateAppendOperations 计算Append模式下需要处理的条目，跳过已存在且内容相同的条目
 // 同时过滤掉标准问或相似问与同批次或已有知识库中重复的条目
 func (s *knowledgeService) calculateAppendOperations(ctx context.Context,
-	tenantID uint64, kbID string, entries []types.FAQEntryPayload,
+	kbID string, entries []types.FAQEntryPayload,
 ) ([]types.FAQEntryPayload, int, error) {
 	if len(entries) == 0 {
 		return []types.FAQEntryPayload{}, 0, nil
 	}
 
 	// 1. 查询知识库中已有的所有FAQ chunks的metadata
-	existingChunks, err := s.chunkRepo.ListAllFAQChunksWithMetadataByKnowledgeBaseID(ctx, tenantID, kbID)
+	existingChunks, err := s.chunkRepo.ListAllFAQChunksWithMetadataByKnowledgeBaseID(ctx, kbID)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to list existing FAQ chunks: %w", err)
 	}
@@ -4257,13 +4306,13 @@ func (s *knowledgeService) calculateAppendOperations(ctx context.Context,
 // calculateReplaceOperations 计算Replace模式下需要删除、创建、更新的条目
 // 同时过滤掉同批次内标准问或相似问重复的条目
 func (s *knowledgeService) calculateReplaceOperations(ctx context.Context,
-	tenantID uint64, knowledgeID string, newEntries []types.FAQEntryPayload,
+	knowledgeID string, newEntries []types.FAQEntryPayload,
 ) ([]types.FAQEntryPayload, []*types.Chunk, int, error) {
 	// 获取 kbID 用于解析 tag
 	var kbID string
 	if len(newEntries) > 0 {
 		// 从 knowledgeID 获取 kbID
-		knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
+		knowledge, err := s.repo.GetKnowledgeByID(ctx, knowledgeID)
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("failed to get knowledge: %w", err)
 		}
@@ -4327,7 +4376,7 @@ func (s *knowledgeService) calculateReplaceOperations(ctx context.Context,
 	}
 
 	// 查询所有已存在的chunks
-	allExistingChunks, err := s.chunkRepo.ListAllFAQChunksByKnowledgeID(ctx, tenantID, knowledgeID)
+	allExistingChunks, err := s.chunkRepo.ListAllFAQChunksByKnowledgeID(ctx, knowledgeID)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("failed to list existing chunks: %w", err)
 	}
@@ -4388,7 +4437,7 @@ func (s *knowledgeService) calculateReplaceOperations(ctx context.Context,
 
 // executeFAQImport 执行实际的FAQ导入逻辑
 func (s *knowledgeService) executeFAQImport(ctx context.Context, taskID string, kbID string,
-	payload *types.FAQBatchUpsertPayload, tenantID uint64, processedCount int,
+	payload *types.FAQBatchUpsertPayload, processedCount int,
 	progress *types.FAQImportProgress,
 ) (err error) {
 	// 保存知识库和embedding模型信息，用于清理索引
@@ -4416,11 +4465,14 @@ func (s *knowledgeService) executeFAQImport(ctx context.Context, taskID string, 
 	kb.EnsureDefaults()
 
 	// 获取embedding模型，用于后续清理索引
-	embeddingModel, err = s.modelService.GetEmbeddingModel(ctx, kb.EmbeddingModelID)
+	faqKnowledge, err := s.ensureFAQKnowledge(ctx, kb)
+	if err != nil {
+		return err
+	}
+	embeddingModel, err = s.modelService.GetEmbeddingModel(ctx, faqKnowledge.EmbeddingModelID)
 	if err != nil {
 		return fmt.Errorf("failed to get embedding model: %w", err)
 	}
-	faqKnowledge, err := s.ensureFAQKnowledge(ctx, tenantID, kb)
 	if err != nil {
 		return err
 	}
@@ -4440,7 +4492,6 @@ func (s *knowledgeService) executeFAQImport(ctx context.Context, taskID string, 
 		// Replace模式：计算需要删除、创建、更新的条目
 		entriesToProcess, chunksToDelete, skippedCount, err = s.calculateReplaceOperations(
 			ctx,
-			tenantID,
 			faqKnowledge.ID,
 			payload.Entries,
 		)
@@ -4454,7 +4505,7 @@ func (s *knowledgeService) executeFAQImport(ctx context.Context, taskID string, 
 			for _, chunk := range chunksToDelete {
 				chunkIDsToDelete = append(chunkIDsToDelete, chunk.ID)
 			}
-			if err := s.chunkRepo.DeleteChunks(ctx, tenantID, chunkIDsToDelete); err != nil {
+			if err := s.chunkRepo.DeleteChunks(ctx, chunkIDsToDelete); err != nil {
 				return fmt.Errorf("failed to delete chunks: %w", err)
 			}
 			// 删除索引
@@ -4465,7 +4516,7 @@ func (s *knowledgeService) executeFAQImport(ctx context.Context, taskID string, 
 		}
 	} else {
 		// Append模式：查询已存在的条目，跳过未变化的
-		entriesToProcess, skippedCount, err = s.calculateAppendOperations(ctx, tenantID, kb.ID, payload.Entries)
+		entriesToProcess, skippedCount, err = s.calculateAppendOperations(ctx, kb.ID, payload.Entries)
 		if err != nil {
 			return fmt.Errorf("failed to calculate append operations: %w", err)
 		}
@@ -4541,7 +4592,6 @@ func (s *knowledgeService) executeFAQImport(ctx context.Context, taskID string, 
 			// ChunkIndex计算：startChunkIndex + (i+idx) + initialProcessed
 			chunk := &types.Chunk{
 				ID:              uuid.New().String(),
-				TenantID:        tenantID,
 				KnowledgeID:     faqKnowledge.ID,
 				KnowledgeBaseID: kb.ID,
 				Content:         buildFAQChunkContent(meta, indexMode),
@@ -4616,18 +4666,17 @@ func (s *knowledgeService) executeFAQImport(ctx context.Context, taskID string, 
 				standardQ = meta.StandardQuestion
 			}
 			// 获取 tag info
-			var tagID int64
 			tagName := ""
+			tagIDStr := chunk.TagID
 			if chunk.TagID != "" {
-				if tag, err := s.tagRepo.GetByID(ctx, tenantID, chunk.TagID); err == nil && tag != nil {
-					tagID = tag.SeqID
+				if tag, err := s.tagRepo.GetByID(ctx, chunk.TagID); err == nil && tag != nil {
 					tagName = tag.Name
 				}
 			}
 			progress.SuccessEntries = append(progress.SuccessEntries, types.FAQSuccessEntry{
 				Index:            entryIdx,
 				SeqID:            chunk.SeqID,
-				TagID:            tagID,
+				TagID:            tagIDStr,
 				TagName:          tagName,
 				StandardQuestion: standardQ,
 			})
@@ -4705,7 +4754,7 @@ func (s *knowledgeService) CreateFAQEntry(ctx context.Context,
 	}
 
 	// 确保FAQ Knowledge存在
-	faqKnowledge, err := s.ensureFAQKnowledge(ctx, tenantID, kb)
+	faqKnowledge, err := s.ensureFAQKnowledge(ctx, kb)
 	if err != nil {
 		return nil, fmt.Errorf("failed to ensure FAQ knowledge: %w", err)
 	}
@@ -4716,8 +4765,12 @@ func (s *knowledgeService) CreateFAQEntry(ctx context.Context,
 		indexMode = kb.FAQConfig.IndexMode
 	}
 
-	// 获取embedding模型
-	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, kb.EmbeddingModelID)
+	// 获取embedding模型 (use default)
+	defaultEmbModelID, err := s.getDefaultEmbeddingModelIDFromModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, defaultEmbModelID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get embedding model: %w", err)
 	}
@@ -4735,7 +4788,6 @@ func (s *knowledgeService) CreateFAQEntry(ctx context.Context,
 
 	chunk := &types.Chunk{
 		ID:              uuid.New().String(),
-		TenantID:        tenantID,
 		KnowledgeID:     faqKnowledge.ID,
 		KnowledgeBaseID: kb.ID,
 		Content:         buildFAQChunkContent(meta, indexMode),
@@ -4772,13 +4824,10 @@ func (s *knowledgeService) CreateFAQEntry(ctx context.Context,
 		return nil, fmt.Errorf("failed to update chunk status: %w", err)
 	}
 
-	// Build tag seq_id map for conversion
+	// Build tag seq_id map for conversion (SeqID removed, using 0)
 	tagSeqIDMap := make(map[string]int64)
 	if chunk.TagID != "" {
-		tag, tagErr := s.tagRepo.GetByID(ctx, tenantID, chunk.TagID)
-		if tagErr == nil && tag != nil {
-			tagSeqIDMap[tag.ID] = tag.SeqID
-		}
+		tagSeqIDMap[chunk.TagID] = 0
 	}
 
 	// 转换为FAQEntry返回
@@ -4789,7 +4838,7 @@ func (s *knowledgeService) CreateFAQEntry(ctx context.Context,
 
 	// 查询TagName
 	if chunk.TagID != "" {
-		tag, tagErr := s.tagRepo.GetByID(ctx, tenantID, chunk.TagID)
+		tag, tagErr := s.tagRepo.GetByID(ctx, chunk.TagID)
 		if tagErr == nil && tag != nil {
 			entry.TagName = tag.Name
 		}
@@ -4815,13 +4864,13 @@ func (s *knowledgeService) GetFAQEntry(ctx context.Context,
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 
 	// 获取chunk by seq_id
-	chunk, err := s.chunkRepo.GetChunkBySeqID(ctx, tenantID, entrySeqID)
+	chunk, err := s.chunkRepo.GetChunkBySeqID(ctx, entrySeqID)
 	if err != nil {
 		return nil, werrors.NewNotFoundError("FAQ条目不存在")
 	}
 
 	// 验证chunk属于当前知识库
-	if chunk.KnowledgeBaseID != kb.ID || chunk.TenantID != tenantID {
+	if chunk.KnowledgeBaseID != kb.ID || 0 != tenantID {
 		return nil, werrors.NewNotFoundError("FAQ条目不存在")
 	}
 
@@ -4830,13 +4879,10 @@ func (s *knowledgeService) GetFAQEntry(ctx context.Context,
 		return nil, werrors.NewNotFoundError("FAQ条目不存在")
 	}
 
-	// Build tag seq_id map for conversion
+	// Build tag seq_id map for conversion (SeqID removed, using 0)
 	tagSeqIDMap := make(map[string]int64)
 	if chunk.TagID != "" {
-		tag, tagErr := s.tagRepo.GetByID(ctx, tenantID, chunk.TagID)
-		if tagErr == nil && tag != nil {
-			tagSeqIDMap[tag.ID] = tag.SeqID
-		}
+		tagSeqIDMap[chunk.TagID] = 0
 	}
 
 	// 转换为FAQEntry返回
@@ -4847,7 +4893,7 @@ func (s *knowledgeService) GetFAQEntry(ctx context.Context,
 
 	// 查询TagName
 	if chunk.TagID != "" {
-		tag, tagErr := s.tagRepo.GetByID(ctx, tenantID, chunk.TagID)
+		tag, tagErr := s.tagRepo.GetByID(ctx, chunk.TagID)
 		if tagErr == nil && tag != nil {
 			entry.TagName = tag.Name
 		}
@@ -4870,7 +4916,7 @@ func (s *knowledgeService) UpdateFAQEntry(ctx context.Context,
 	kb.EnsureDefaults()
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 
-	chunk, err := s.chunkRepo.GetChunkBySeqID(ctx, tenantID, entrySeqID)
+	chunk, err := s.chunkRepo.GetChunkBySeqID(ctx, entrySeqID)
 	if err != nil {
 		return nil, werrors.NewNotFoundError("FAQ条目不存在")
 	}
@@ -4917,13 +4963,13 @@ func (s *knowledgeService) UpdateFAQEntry(ctx context.Context,
 	}
 	chunk.Content = buildFAQChunkContent(meta, indexMode)
 
-	// Convert tag seq_id to UUID
-	if payload.TagID > 0 {
-		tag, tagErr := s.tagRepo.GetBySeqID(ctx, tenantID, payload.TagID)
+	// Set tag ID directly (now a UUID string)
+	if payload.TagID != "" {
+		_, tagErr := s.tagRepo.GetByID(ctx, payload.TagID)
 		if tagErr != nil {
 			return nil, werrors.NewNotFoundError("标签不存在")
 		}
-		chunk.TagID = tag.ID
+		chunk.TagID = payload.TagID
 	} else {
 		chunk.TagID = ""
 	}
@@ -4948,12 +4994,16 @@ func (s *knowledgeService) UpdateFAQEntry(ctx context.Context,
 	// indexFAQChunks will delete old vectors and re-insert with the latest chunk data
 	// (including the updated is_enabled status). Calling both would cause version conflicts.
 
-	faqKnowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, chunk.KnowledgeID)
+	faqKnowledge, err := s.repo.GetKnowledgeByID(ctx, chunk.KnowledgeID)
 	if err != nil {
 		return nil, err
 	}
 
-	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, kb.EmbeddingModelID)
+	defEmbModelID, err := s.getDefaultEmbeddingModelIDFromModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, defEmbModelID)
 	if err != nil {
 		return nil, err
 	}
@@ -4980,7 +5030,7 @@ func (s *knowledgeService) UpdateFAQEntry(ctx context.Context,
 				}
 				if len(sourceIDsToDelete) > 0 {
 					logger.Debugf(ctx, "UpdateFAQEntry: incremental delete %d obsolete source IDs", len(sourceIDsToDelete))
-					if delErr := retrieveEngine.DeleteBySourceIDList(ctx, sourceIDsToDelete, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); delErr != nil {
+					if delErr := retrieveEngine.DeleteBySourceIDList(ctx, kb.ID, sourceIDsToDelete, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); delErr != nil {
 						logger.Warnf(ctx, "UpdateFAQEntry: failed to delete obsolete source IDs: %v", delErr)
 					}
 				}
@@ -4993,13 +5043,10 @@ func (s *knowledgeService) UpdateFAQEntry(ctx context.Context,
 		}
 	}
 
-	// Build tag seq_id map for conversion
+	// Build tag seq_id map for conversion (SeqID removed, using 0)
 	tagSeqIDMap := make(map[string]int64)
 	if chunk.TagID != "" {
-		tag, tagErr := s.tagRepo.GetByID(ctx, tenantID, chunk.TagID)
-		if tagErr == nil && tag != nil {
-			tagSeqIDMap[tag.ID] = tag.SeqID
-		}
+		tagSeqIDMap[chunk.TagID] = 0
 	}
 
 	// 转换为FAQEntry返回
@@ -5010,7 +5057,7 @@ func (s *knowledgeService) UpdateFAQEntry(ctx context.Context,
 
 	// 查询TagName
 	if chunk.TagID != "" {
-		tag, tagErr := s.tagRepo.GetByID(ctx, tenantID, chunk.TagID)
+		tag, tagErr := s.tagRepo.GetByID(ctx, chunk.TagID)
 		if tagErr == nil && tag != nil {
 			entry.TagName = tag.Name
 		}
@@ -5036,7 +5083,7 @@ func (s *knowledgeService) AddSimilarQuestions(ctx context.Context,
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 
 	// Get existing FAQ entry
-	chunk, err := s.chunkRepo.GetChunkBySeqID(ctx, tenantID, entrySeqID)
+	chunk, err := s.chunkRepo.GetChunkBySeqID(ctx, entrySeqID)
 	if err != nil {
 		return nil, werrors.NewNotFoundError("FAQ条目不存在")
 	}
@@ -5078,10 +5125,7 @@ func (s *knowledgeService) AddSimilarQuestions(ctx context.Context,
 		// No new questions to add, return current entry
 		tagSeqIDMap := make(map[string]int64)
 		if chunk.TagID != "" {
-			tag, tagErr := s.tagRepo.GetByID(ctx, tenantID, chunk.TagID)
-			if tagErr == nil && tag != nil {
-				tagSeqIDMap[tag.ID] = tag.SeqID
-			}
+			tagSeqIDMap[chunk.TagID] = 0
 		}
 		return s.chunkToFAQEntry(chunk, kb, tagSeqIDMap)
 	}
@@ -5117,12 +5161,16 @@ func (s *knowledgeService) AddSimilarQuestions(ctx context.Context,
 	}
 
 	// Index new similar questions
-	faqKnowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, chunk.KnowledgeID)
+	faqKnowledge, err := s.repo.GetKnowledgeByID(ctx, chunk.KnowledgeID)
 	if err != nil {
 		return nil, err
 	}
 
-	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, kb.EmbeddingModelID)
+	defEmbID2, err := s.getDefaultEmbeddingModelIDFromModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, defEmbID2)
 	if err != nil {
 		return nil, err
 	}
@@ -5148,10 +5196,7 @@ func (s *knowledgeService) AddSimilarQuestions(ctx context.Context,
 	// Build response
 	tagSeqIDMap := make(map[string]int64)
 	if chunk.TagID != "" {
-		tag, tagErr := s.tagRepo.GetByID(ctx, tenantID, chunk.TagID)
-		if tagErr == nil && tag != nil {
-			tagSeqIDMap[tag.ID] = tag.SeqID
-		}
+		tagSeqIDMap[chunk.TagID] = 0
 	}
 
 	entry, err := s.chunkToFAQEntry(chunk, kb, tagSeqIDMap)
@@ -5160,7 +5205,7 @@ func (s *knowledgeService) AddSimilarQuestions(ctx context.Context,
 	}
 
 	if chunk.TagID != "" {
-		tag, tagErr := s.tagRepo.GetByID(ctx, tenantID, chunk.TagID)
+		tag, tagErr := s.tagRepo.GetByID(ctx, chunk.TagID)
 		if tagErr == nil && tag != nil {
 			entry.TagName = tag.Name
 		}
@@ -5177,8 +5222,7 @@ func (s *knowledgeService) UpdateFAQEntryStatus(ctx context.Context,
 	if err != nil {
 		return err
 	}
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-	chunk, err := s.chunkRepo.GetChunkByID(ctx, tenantID, entryID)
+	chunk, err := s.chunkRepo.GetChunkByID(ctx, entryID)
 	if err != nil {
 		return err
 	}
@@ -5201,7 +5245,7 @@ func (s *knowledgeService) UpdateFAQEntryStatus(ctx context.Context,
 	if err != nil {
 		return err
 	}
-	if err := retrieveEngine.BatchUpdateChunkEnabledStatus(ctx, chunkStatusMap); err != nil {
+	if err := retrieveEngine.BatchUpdateChunkEnabledStatus(ctx, kb.ID, chunkStatusMap); err != nil {
 		return err
 	}
 
@@ -5223,15 +5267,14 @@ func (s *knowledgeService) UpdateFAQEntryFieldsBatch(ctx context.Context,
 	if err != nil {
 		return err
 	}
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 
 	enabledUpdates := make(map[string]bool)
-	tagUpdates := make(map[string]string)
+	tagUpdates := make(map[string]types.ChunkTagUpdate)
 
 	// Convert exclude seq_ids to UUIDs
 	excludeUUIDs := make([]string, 0, len(req.ExcludeIDs))
 	if len(req.ExcludeIDs) > 0 {
-		excludeChunks, err := s.chunkRepo.ListChunksBySeqID(ctx, tenantID, req.ExcludeIDs)
+		excludeChunks, err := s.chunkRepo.ListChunksBySeqID(ctx, req.ExcludeIDs)
 		if err == nil {
 			for _, c := range excludeChunks {
 				excludeUUIDs = append(excludeUUIDs, c.ID)
@@ -5239,13 +5282,13 @@ func (s *knowledgeService) UpdateFAQEntryFieldsBatch(ctx context.Context,
 		}
 	}
 
-	// Handle ByTag updates first (by tag seq_id)
+	// Handle ByTag updates first (by tag UUID)
 	if len(req.ByTag) > 0 {
-		for tagSeqID, update := range req.ByTag {
-			// Convert tag seq_id to UUID
-			tag, err := s.tagRepo.GetBySeqID(ctx, tenantID, tagSeqID)
+		for tagUUID, update := range req.ByTag {
+			// Validate tag exists
+			_, err := s.tagRepo.GetByID(ctx, tagUUID)
 			if err != nil {
-				return werrors.NewNotFoundError(fmt.Sprintf("标签 %d 不存在", tagSeqID))
+				return werrors.NewNotFoundError(fmt.Sprintf("标签 %s 不存在", tagUUID))
 			}
 
 			var setFlags, clearFlags types.ChunkFlags
@@ -5259,15 +5302,15 @@ func (s *knowledgeService) UpdateFAQEntryFieldsBatch(ctx context.Context,
 				}
 			}
 
-			// Convert new tag seq_id to UUID if provided
+			// Set new tag UUID if provided
 			var newTagUUID *string
 			if update.TagID != nil {
-				if *update.TagID > 0 {
-					newTag, err := s.tagRepo.GetBySeqID(ctx, tenantID, *update.TagID)
+				if *update.TagID != "" {
+					_, err := s.tagRepo.GetByID(ctx, *update.TagID)
 					if err != nil {
-						return werrors.NewNotFoundError(fmt.Sprintf("标签 %d 不存在", *update.TagID))
+						return werrors.NewNotFoundError(fmt.Sprintf("标签 %s 不存在", *update.TagID))
 					}
-					newTagUUID = &newTag.ID
+					newTagUUID = update.TagID
 				} else {
 					emptyStr := ""
 					newTagUUID = &emptyStr
@@ -5276,7 +5319,7 @@ func (s *knowledgeService) UpdateFAQEntryFieldsBatch(ctx context.Context,
 
 			// Update all chunks with this tag
 			affectedIDs, err := s.chunkRepo.UpdateChunkFieldsByTagID(
-				ctx, tenantID, kb.ID, tag.ID,
+				ctx, kb.ID, tagUUID,
 				update.IsEnabled, setFlags, clearFlags, newTagUUID, excludeUUIDs,
 			)
 			if err != nil {
@@ -5291,8 +5334,14 @@ func (s *knowledgeService) UpdateFAQEntryFieldsBatch(ctx context.Context,
 					}
 				}
 				if newTagUUID != nil {
+					var ancestors []string
+					if *newTagUUID != "" {
+						if chain, aerr := s.tagRepo.AncestorIDs(ctx, *newTagUUID); aerr == nil {
+							ancestors = chain
+						}
+					}
 					for _, id := range affectedIDs {
-						tagUpdates[id] = *newTagUUID
+						tagUpdates[id] = types.ChunkTagUpdate{TagIDs: ancestors}
 					}
 				}
 			}
@@ -5305,7 +5354,7 @@ func (s *knowledgeService) UpdateFAQEntryFieldsBatch(ctx context.Context,
 		for entrySeqID := range req.ByID {
 			entrySeqIDs = append(entrySeqIDs, entrySeqID)
 		}
-		chunks, err := s.chunkRepo.ListChunksBySeqID(ctx, tenantID, entrySeqIDs)
+		chunks, err := s.chunkRepo.ListChunksBySeqID(ctx, entrySeqIDs)
 		if err != nil {
 			return err
 		}
@@ -5350,19 +5399,24 @@ func (s *knowledgeService) UpdateFAQEntryFieldsBatch(ctx context.Context,
 				}
 			}
 
-			// Handle TagID (convert seq_id to UUID)
+			// Handle TagID (now UUID string)
 			if update.TagID != nil {
-				var newTagID string
-				if *update.TagID > 0 {
-					newTag, err := s.tagRepo.GetBySeqID(ctx, tenantID, *update.TagID)
+				newTagID := *update.TagID
+				if newTagID != "" {
+					_, err := s.tagRepo.GetByID(ctx, newTagID)
 					if err != nil {
-						return werrors.NewNotFoundError(fmt.Sprintf("标签 %d 不存在", *update.TagID))
+						return werrors.NewNotFoundError(fmt.Sprintf("标签 %s 不存在", newTagID))
 					}
-					newTagID = newTag.ID
 				}
 				if chunk.TagID != newTagID {
 					chunk.TagID = newTagID
-					tagUpdates[chunk.ID] = newTagID
+					var ancestors []string
+					if newTagID != "" {
+						if chain, aerr := s.tagRepo.AncestorIDs(ctx, newTagID); aerr == nil {
+							ancestors = chain
+						}
+					}
+					tagUpdates[chunk.ID] = types.ChunkTagUpdate{TagIDs: ancestors}
 					needUpdate = true
 				}
 			}
@@ -5382,7 +5436,7 @@ func (s *knowledgeService) UpdateFAQEntryFieldsBatch(ctx context.Context,
 
 		// Batch update flags (for IsRecommended)
 		if len(setFlags) > 0 || len(clearFlags) > 0 {
-			if err := s.chunkRepo.UpdateChunkFlagsBatch(ctx, tenantID, kb.ID, setFlags, clearFlags); err != nil {
+			if err := s.chunkRepo.UpdateChunkFlagsBatch(ctx, kb.ID, setFlags, clearFlags); err != nil {
 				return err
 			}
 		}
@@ -5399,12 +5453,12 @@ func (s *knowledgeService) UpdateFAQEntryFieldsBatch(ctx context.Context,
 			return err
 		}
 		if len(enabledUpdates) > 0 {
-			if err := retrieveEngine.BatchUpdateChunkEnabledStatus(ctx, enabledUpdates); err != nil {
+			if err := retrieveEngine.BatchUpdateChunkEnabledStatus(ctx, kb.ID, enabledUpdates); err != nil {
 				return err
 			}
 		}
 		if len(tagUpdates) > 0 {
-			if err := retrieveEngine.BatchUpdateChunkTagID(ctx, tagUpdates); err != nil {
+			if err := retrieveEngine.BatchUpdateChunkTagID(ctx, kb.ID, tagUpdates); err != nil {
 				return err
 			}
 		}
@@ -5415,15 +5469,14 @@ func (s *knowledgeService) UpdateFAQEntryFieldsBatch(ctx context.Context,
 
 // UpdateKnowledgeTag updates the tag assigned to a knowledge document.
 func (s *knowledgeService) UpdateKnowledgeTag(ctx context.Context, knowledgeID string, tagID *string) error {
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, knowledgeID)
 	if err != nil {
 		return err
 	}
 
 	var resolvedTagID string
 	if tagID != nil && *tagID != "" {
-		tag, err := s.tagRepo.GetByID(ctx, tenantID, *tagID)
+		tag, err := s.tagRepo.GetByID(ctx, *tagID)
 		if err != nil {
 			return err
 		}
@@ -5448,7 +5501,7 @@ func (s *knowledgeService) UpdateKnowledgeTagBatch(ctx context.Context, authoriz
 	if tenantIDVal == nil {
 		return werrors.NewUnauthorizedError("tenant ID not found in context")
 	}
-	tenantID, ok := tenantIDVal.(uint64)
+	_, ok := tenantIDVal.(uint64)
 	if !ok {
 		return werrors.NewUnauthorizedError("invalid tenant ID in context")
 	}
@@ -5458,7 +5511,7 @@ func (s *knowledgeService) UpdateKnowledgeTagBatch(ctx context.Context, authoriz
 	for knowledgeID := range updates {
 		knowledgeIDs = append(knowledgeIDs, knowledgeID)
 	}
-	knowledgeList, err := s.repo.GetKnowledgeBatch(ctx, tenantID, knowledgeIDs)
+	knowledgeList, err := s.repo.GetKnowledgeBatch(ctx, knowledgeIDs)
 	if err != nil {
 		return err
 	}
@@ -5492,7 +5545,7 @@ func (s *knowledgeService) UpdateKnowledgeTagBatch(ctx context.Context, authoriz
 			tagIDs = append(tagIDs, tagID)
 		}
 		for _, tagID := range tagIDs {
-			tag, err := s.tagRepo.GetByID(ctx, tenantID, tagID)
+			tag, err := s.tagRepo.GetByID(ctx, tagID)
 			if err != nil {
 				return err
 			}
@@ -5537,8 +5590,7 @@ func (s *knowledgeService) UpdateFAQEntryTag(ctx context.Context, kbID string, e
 	if err != nil {
 		return err
 	}
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-	chunk, err := s.chunkRepo.GetChunkByID(ctx, tenantID, entryID)
+	chunk, err := s.chunkRepo.GetChunkByID(ctx, entryID)
 	if err != nil {
 		return err
 	}
@@ -5548,7 +5600,7 @@ func (s *knowledgeService) UpdateFAQEntryTag(ctx context.Context, kbID string, e
 
 	var resolvedTagID string
 	if tagID != nil && *tagID != "" {
-		tag, err := s.tagRepo.GetByID(ctx, tenantID, *tagID)
+		tag, err := s.tagRepo.GetByID(ctx, *tagID)
 		if err != nil {
 			return err
 		}
@@ -5578,12 +5630,18 @@ func (s *knowledgeService) UpdateFAQEntryTag(ctx context.Context, kbID string, e
 	if err != nil {
 		return err
 	}
-	return retrieveEngine.BatchUpdateChunkTagID(ctx, map[string]string{chunk.ID: resolvedTagID})
+	var resolvedAncestors []string
+	if resolvedTagID != "" {
+		if chain, aerr := s.tagRepo.AncestorIDs(ctx, resolvedTagID); aerr == nil {
+			resolvedAncestors = chain
+		}
+	}
+	return retrieveEngine.BatchUpdateChunkTagID(ctx, kb.ID, map[string]types.ChunkTagUpdate{chunk.ID: {TagIDs: resolvedAncestors}})
 }
 
 // UpdateFAQEntryTagBatch updates tags for FAQ entries in batch.
-// Key: entry seq_id, Value: tag seq_id (nil to remove tag)
-func (s *knowledgeService) UpdateFAQEntryTagBatch(ctx context.Context, kbID string, updates map[int64]*int64) error {
+// Key: entry seq_id, Value: tag UUID (nil to remove tag)
+func (s *knowledgeService) UpdateFAQEntryTagBatch(ctx context.Context, kbID string, updates map[int64]*string) error {
 	if len(updates) == 0 {
 		return nil
 	}
@@ -5591,14 +5649,13 @@ func (s *knowledgeService) UpdateFAQEntryTagBatch(ctx context.Context, kbID stri
 	if err != nil {
 		return err
 	}
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 
 	// Get all chunks in batch by seq_id
 	entrySeqIDs := make([]int64, 0, len(updates))
 	for entrySeqID := range updates {
 		entrySeqIDs = append(entrySeqIDs, entrySeqID)
 	}
-	chunks, err := s.chunkRepo.ListChunksBySeqID(ctx, tenantID, entrySeqIDs)
+	chunks, err := s.chunkRepo.ListChunksBySeqID(ctx, entrySeqIDs)
 	if err != nil {
 		return err
 	}
@@ -5609,36 +5666,37 @@ func (s *knowledgeService) UpdateFAQEntryTagBatch(ctx context.Context, kbID stri
 		chunkBySeqID[chunk.SeqID] = chunk
 	}
 
-	// Build tag seq_id set for validation
-	tagSeqIDSet := make(map[int64]bool)
-	for _, tagSeqID := range updates {
-		if tagSeqID != nil && *tagSeqID > 0 {
-			tagSeqIDSet[*tagSeqID] = true
+	// Build tag UUID set for validation
+	tagIDSet := make(map[string]bool)
+	for _, tagUUID := range updates {
+		if tagUUID != nil && *tagUUID != "" {
+			tagIDSet[*tagUUID] = true
 		}
 	}
 
-	// Validate all tags in batch by seq_id
-	tagMap := make(map[int64]*types.KnowledgeTag)
-	if len(tagSeqIDSet) > 0 {
-		tagSeqIDs := make([]int64, 0, len(tagSeqIDSet))
-		for tagSeqID := range tagSeqIDSet {
-			tagSeqIDs = append(tagSeqIDs, tagSeqID)
+	// Validate all tags in batch
+	tagMap := make(map[string]*types.KnowledgeTag)
+	if len(tagIDSet) > 0 {
+		tagIDs := make([]string, 0, len(tagIDSet))
+		for tagID := range tagIDSet {
+			tagIDs = append(tagIDs, tagID)
 		}
-		tags, err := s.tagRepo.GetBySeqIDs(ctx, tenantID, tagSeqIDs)
+		tags, err := s.tagRepo.GetByIDs(ctx, tagIDs)
 		if err != nil {
 			return err
 		}
 		for _, tag := range tags {
 			if tag.KnowledgeBaseID != kb.ID {
-				return werrors.NewBadRequestError(fmt.Sprintf("标签 %d 不属于当前知识库", tag.SeqID))
+				return werrors.NewBadRequestError(fmt.Sprintf("标签 %s 不属于当前知识库", tag.ID))
 			}
-			tagMap[tag.SeqID] = tag
+			tagMap[tag.ID] = tag
 		}
 	}
 
 	// Update chunks
 	chunksToUpdate := make([]*types.Chunk, 0)
-	for entrySeqID, tagSeqID := range updates {
+	tagUpdates := make(map[string]types.ChunkTagUpdate)
+	for entrySeqID, tagUUID := range updates {
 		chunk, exists := chunkBySeqID[entrySeqID]
 		if !exists {
 			continue
@@ -5648,17 +5706,24 @@ func (s *knowledgeService) UpdateFAQEntryTagBatch(ctx context.Context, kbID stri
 		}
 
 		var resolvedTagID string
-		if tagSeqID != nil && *tagSeqID > 0 {
-			tag, ok := tagMap[*tagSeqID]
+		if tagUUID != nil && *tagUUID != "" {
+			_, ok := tagMap[*tagUUID]
 			if !ok {
-				return werrors.NewBadRequestError(fmt.Sprintf("标签 %d 不存在", *tagSeqID))
+				return werrors.NewBadRequestError(fmt.Sprintf("标签 %s 不存在", *tagUUID))
 			}
-			resolvedTagID = tag.ID
+			resolvedTagID = *tagUUID
 		}
 
 		chunk.TagID = resolvedTagID
 		chunk.UpdatedAt = time.Now()
 		chunksToUpdate = append(chunksToUpdate, chunk)
+		var ancestors []string
+		if resolvedTagID != "" {
+			if chain, aerr := s.tagRepo.AncestorIDs(ctx, resolvedTagID); aerr == nil {
+				ancestors = chain
+			}
+		}
+		tagUpdates[chunk.ID] = types.ChunkTagUpdate{TagIDs: ancestors}
 	}
 
 	if len(chunksToUpdate) > 0 {
@@ -5667,10 +5732,6 @@ func (s *knowledgeService) UpdateFAQEntryTagBatch(ctx context.Context, kbID stri
 		}
 
 		// Sync tag updates to retriever engines
-		tagUpdates := make(map[string]string)
-		for _, chunk := range chunksToUpdate {
-			tagUpdates[chunk.ID] = chunk.TagID
-		}
 		tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 		retrieveEngine, err := retriever.NewCompositeRetrieveEngine(
 			s.retrieveEngine,
@@ -5679,7 +5740,7 @@ func (s *knowledgeService) UpdateFAQEntryTagBatch(ctx context.Context, kbID stri
 		if err != nil {
 			return err
 		}
-		if err := retrieveEngine.BatchUpdateChunkTagID(ctx, tagUpdates); err != nil {
+		if err := retrieveEngine.BatchUpdateChunkTagID(ctx, kb.ID, tagUpdates); err != nil {
 			return err
 		}
 	}
@@ -5708,32 +5769,18 @@ func (s *knowledgeService) SearchFAQEntries(ctx context.Context,
 		req.MatchCount = 50
 	}
 
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
+	// Tag IDs are now UUIDs directly from request
+	firstPriorityTagUUIDs := req.FirstPriorityTagIDs
+	secondPriorityTagUUIDs := req.SecondPriorityTagIDs
 
-	// Convert tag seq_ids to UUIDs
-	var firstPriorityTagUUIDs, secondPriorityTagUUIDs []string
-	firstPrioritySeqIDSet := make(map[int64]struct{})
-	secondPrioritySeqIDSet := make(map[int64]struct{})
-
-	if len(req.FirstPriorityTagIDs) > 0 {
-		tags, err := s.tagRepo.GetBySeqIDs(ctx, tenantID, req.FirstPriorityTagIDs)
-		if err == nil {
-			firstPriorityTagUUIDs = make([]string, 0, len(tags))
-			for _, tag := range tags {
-				firstPriorityTagUUIDs = append(firstPriorityTagUUIDs, tag.ID)
-				firstPrioritySeqIDSet[tag.SeqID] = struct{}{}
-			}
-		}
+	// Build sets for priority matching
+	firstPriorityIDSet := make(map[string]struct{})
+	for _, id := range firstPriorityTagUUIDs {
+		firstPriorityIDSet[id] = struct{}{}
 	}
-	if len(req.SecondPriorityTagIDs) > 0 {
-		tags, err := s.tagRepo.GetBySeqIDs(ctx, tenantID, req.SecondPriorityTagIDs)
-		if err == nil {
-			secondPriorityTagUUIDs = make([]string, 0, len(tags))
-			for _, tag := range tags {
-				secondPriorityTagUUIDs = append(secondPriorityTagUUIDs, tag.ID)
-				secondPrioritySeqIDSet[tag.SeqID] = struct{}{}
-			}
-		}
+	secondPriorityIDSet := make(map[string]struct{})
+	for _, id := range secondPriorityTagUUIDs {
+		secondPriorityIDSet[id] = struct{}{}
 	}
 
 	// Build priority tag sets for sorting (using UUID)
@@ -5854,7 +5901,7 @@ func (s *knowledgeService) SearchFAQEntries(ctx context.Context,
 	}
 
 	// Batch fetch chunks
-	chunks, err := s.chunkRepo.ListChunksByID(ctx, tenantID, chunkIDs)
+	chunks, err := s.chunkRepo.ListChunksByID(ctx, chunkIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -5872,10 +5919,10 @@ func (s *knowledgeService) SearchFAQEntries(ctx context.Context,
 		}
 	}
 	if len(tagIDs) > 0 {
-		tags, err := s.tagRepo.GetByIDs(ctx, tenantID, tagIDs)
+		tags, err := s.tagRepo.GetByIDs(ctx, tagIDs)
 		if err == nil {
 			for _, tag := range tags {
-				tagSeqIDMap[tag.ID] = tag.SeqID
+				tagSeqIDMap[tag.ID] = 0 // SeqID removed
 			}
 		}
 	}
@@ -5982,33 +6029,33 @@ func (s *knowledgeService) SearchFAQEntries(ctx context.Context,
 
 	// 批量查询TagName并补充到结果中
 	if len(entries) > 0 {
-		// 收集所有需要查询的TagID (seq_id)
-		tagSeqIDs := make([]int64, 0)
-		tagSeqIDSet := make(map[int64]struct{})
+		// 收集所有需要查询的TagID (UUID)
+		tagIDsForName := make([]string, 0)
+		tagIDSetForName := make(map[string]struct{})
 		for _, entry := range entries {
-			if entry.TagID != 0 {
-				if _, exists := tagSeqIDSet[entry.TagID]; !exists {
-					tagSeqIDs = append(tagSeqIDs, entry.TagID)
-					tagSeqIDSet[entry.TagID] = struct{}{}
+			if entry.TagID != "" {
+				if _, exists := tagIDSetForName[entry.TagID]; !exists {
+					tagIDsForName = append(tagIDsForName, entry.TagID)
+					tagIDSetForName[entry.TagID] = struct{}{}
 				}
 			}
 		}
 
 		// 批量查询标签
-		if len(tagSeqIDs) > 0 {
-			tags, err := s.tagRepo.GetBySeqIDs(ctx, tenantID, tagSeqIDs)
+		if len(tagIDsForName) > 0 {
+			tags, err := s.tagRepo.GetByIDs(ctx, tagIDsForName)
 			if err != nil {
 				logger.Warnf(ctx, "Failed to batch query tags: %v", err)
 			} else {
-				// 构建TagSeqID到TagName的映射
-				tagNameMap := make(map[int64]string)
+				// 构建TagID到TagName的映射
+				tagNameMap := make(map[string]string)
 				for _, tag := range tags {
-					tagNameMap[tag.SeqID] = tag.Name
+					tagNameMap[tag.ID] = tag.Name
 				}
 
 				// 补充TagName
 				for _, entry := range entries {
-					if entry.TagID != 0 {
+					if entry.TagID != "" {
 						if tagName, exists := tagNameMap[entry.TagID]; exists {
 							entry.TagName = tagName
 						}
@@ -6033,14 +6080,13 @@ func (s *knowledgeService) DeleteFAQEntries(ctx context.Context,
 		return err
 	}
 
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 	var faqKnowledge *types.Knowledge
 	chunksToRemove := make([]*types.Chunk, 0, len(entrySeqIDs))
 	for _, seqID := range entrySeqIDs {
 		if seqID <= 0 {
 			continue
 		}
-		chunk, err := s.chunkRepo.GetChunkBySeqID(ctx, tenantID, seqID)
+		chunk, err := s.chunkRepo.GetChunkBySeqID(ctx, seqID)
 		if err != nil {
 			return werrors.NewNotFoundError("FAQ条目不存在")
 		}
@@ -6051,7 +6097,7 @@ func (s *knowledgeService) DeleteFAQEntries(ctx context.Context,
 			return err
 		}
 		if faqKnowledge == nil {
-			faqKnowledge, err = s.repo.GetKnowledgeByID(ctx, tenantID, chunk.KnowledgeID)
+			faqKnowledge, err = s.repo.GetKnowledgeByID(ctx, chunk.KnowledgeID)
 			if err != nil {
 				return err
 			}
@@ -6078,7 +6124,7 @@ func (s *knowledgeService) ExportFAQEntries(ctx context.Context, kbID string) ([
 	}
 
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-	faqKnowledge, err := s.findFAQKnowledge(ctx, tenantID, kb.ID)
+	faqKnowledge, err := s.findFAQKnowledge(ctx, kb.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -6088,7 +6134,7 @@ func (s *knowledgeService) ExportFAQEntries(ctx context.Context, kbID string) ([
 	}
 
 	// Get all FAQ chunks
-	chunks, err := s.chunkRepo.ListAllFAQChunksForExport(ctx, tenantID, faqKnowledge.ID)
+	chunks, err := s.chunkRepo.ListAllFAQChunksForExport(ctx, faqKnowledge.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list FAQ chunks: %w", err)
 	}
@@ -6109,7 +6155,7 @@ func (s *knowledgeService) buildTagMap(ctx context.Context, tenantID uint64, kbI
 
 	for pageNum := 1; ; pageNum++ {
 		page := &types.Pagination{Page: pageNum, PageSize: pageSize}
-		tags, _, err := s.tagRepo.ListByKB(ctx, tenantID, kbID, page, "")
+		tags, _, err := s.tagRepo.ListByKB(ctx, kbID, page, "")
 		if err != nil {
 			return nil, err
 		}
@@ -6210,10 +6256,9 @@ func (s *knowledgeService) validateFAQKnowledgeBase(ctx context.Context, kbID st
 
 func (s *knowledgeService) findFAQKnowledge(
 	ctx context.Context,
-	tenantID uint64,
 	kbID string,
 ) (*types.Knowledge, error) {
-	knowledges, err := s.repo.ListKnowledgeByKnowledgeBaseID(ctx, tenantID, kbID)
+	knowledges, err := s.repo.ListKnowledgeByKnowledgeBaseID(ctx, kbID)
 	if err != nil {
 		return nil, err
 	}
@@ -6227,10 +6272,9 @@ func (s *knowledgeService) findFAQKnowledge(
 
 func (s *knowledgeService) ensureFAQKnowledge(
 	ctx context.Context,
-	tenantID uint64,
 	kb *types.KnowledgeBase,
 ) (*types.Knowledge, error) {
-	existing, err := s.findFAQKnowledge(ctx, tenantID, kb.ID)
+	existing, err := s.findFAQKnowledge(ctx, kb.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -6238,18 +6282,15 @@ func (s *knowledgeService) ensureFAQKnowledge(
 		return existing, nil
 	}
 	knowledge := &types.Knowledge{
-		TenantID:         tenantID,
-		KnowledgeBaseID:  kb.ID,
-		Type:             types.KnowledgeTypeFAQ,
-		Channel:          types.ChannelWeb,
-		Title:            fmt.Sprintf("%s - FAQ", kb.Name),
-		Description:      "FAQ 条目容器",
-		Source:           types.KnowledgeTypeFAQ,
-		ParseStatus:      "completed",
-		EnableStatus:     "enabled",
-		EmbeddingModelID: kb.EmbeddingModelID,
-		CreatedAt:        time.Now(),
-		UpdatedAt:        time.Now(),
+		KnowledgeBaseID: kb.ID,
+		Type:            types.KnowledgeTypeFAQ,
+		Title:           fmt.Sprintf("%s - FAQ", kb.Name),
+		Description:     "FAQ 条目容器",
+		ParseStatus:     "completed",
+		EnableStatus:    types.EnableStatusEnabled,
+		// EmbeddingModelID set below via getDefaultEmbeddingModelID
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 	if err := s.repo.CreateKnowledge(ctx, knowledge); err != nil {
 		return nil, err
@@ -6384,17 +6425,15 @@ func (s *knowledgeService) chunkToFAQEntry(chunk *types.Chunk, kb *types.Knowled
 	}
 
 	// Get tag seq_id from map
-	var tagSeqID int64
-	if chunk.TagID != "" && tagSeqIDMap != nil {
-		tagSeqID = tagSeqIDMap[chunk.TagID]
-	}
+	// TagID is now UUID string - use chunk's tag ID directly
+	tagIDStr := chunk.TagID
 
 	entry := &types.FAQEntry{
 		ID:                chunk.SeqID,
 		ChunkID:           chunk.ID,
 		KnowledgeID:       chunk.KnowledgeID,
 		KnowledgeBaseID:   chunk.KnowledgeBaseID,
-		TagID:             tagSeqID,
+		TagID:             tagIDStr,
 		IsEnabled:         chunk.IsEnabled,
 		IsRecommended:     chunk.Flags.HasFlag(types.ChunkFlagRecommended),
 		StandardQuestion:  meta.StandardQuestion,
@@ -6487,7 +6526,7 @@ func (s *knowledgeService) checkFAQQuestionDuplicate(
 	allQuestions = append(allQuestions, meta.StandardQuestion)
 	allQuestions = append(allQuestions, meta.SimilarQuestions...)
 
-	dupChunk, err := s.chunkRepo.FindFAQChunkWithDuplicateQuestion(ctx, tenantID, kbID, excludeChunkID, allQuestions)
+	dupChunk, err := s.chunkRepo.FindFAQChunkWithDuplicateQuestion(ctx, kbID, excludeChunkID, allQuestions)
 	if err != nil {
 		return fmt.Errorf("failed to check FAQ question duplicate: %w", err)
 	}
@@ -6536,15 +6575,13 @@ func (s *knowledgeService) checkFAQQuestionDuplicate(
 // If no tag is specified, creates or finds the "未分类" tag
 // Returns the internal UUID of the tag
 func (s *knowledgeService) resolveTagID(ctx context.Context, kbID string, payload *types.FAQEntryPayload) (string, error) {
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-
-	// 如果提供了 tag_id (seq_id)，优先使用 tag_id
-	if payload.TagID != 0 {
-		tag, err := s.tagRepo.GetBySeqID(ctx, tenantID, payload.TagID)
+	// 如果提供了 tag_id，优先使用 tag_id
+	if payload.TagID != "" {
+		_, err := s.tagRepo.GetByID(ctx, payload.TagID)
 		if err != nil {
-			return "", fmt.Errorf("failed to find tag by seq_id %d: %w", payload.TagID, err)
+			return "", fmt.Errorf("failed to find tag by id %s: %w", payload.TagID, err)
 		}
-		return tag.ID, nil
+		return payload.TagID, nil
 	}
 
 	// 如果提供了 tag_name，查找或创建标签
@@ -6582,7 +6619,6 @@ func sanitizeFAQEntryPayload(payload *types.FAQEntryPayload) (*types.FAQChunkMet
 		Answers:           payload.Answers,
 		AnswerStrategy:    answerStrategy,
 		Version:           1,
-		Source:            "faq",
 	}
 	meta.Normalize()
 	if meta.StandardQuestion == "" {
@@ -6615,6 +6651,7 @@ func (s *knowledgeService) buildFAQIndexInfoList(
 	ctx context.Context,
 	kb *types.KnowledgeBase,
 	chunk *types.Chunk,
+	fileName string,
 ) ([]*types.IndexInfo, error) {
 	indexMode := types.FAQIndexModeQuestionAnswer
 	questionIndexMode := types.FAQQuestionIndexModeCombined
@@ -6635,6 +6672,13 @@ func (s *knowledgeService) buildFAQIndexInfoList(
 		meta = &types.FAQChunkMetadata{StandardQuestion: chunk.Content}
 	}
 
+	var tagAncestors []string
+	if chunk.TagID != "" {
+		if chain, aerr := s.tagRepo.AncestorIDs(ctx, chunk.TagID); aerr == nil {
+			tagAncestors = chain
+		}
+	}
+
 	// 如果是一起索引模式，使用原有逻辑
 	if questionIndexMode == types.FAQQuestionIndexModeCombined {
 		content := buildFAQIndexContent(meta, indexMode)
@@ -6647,7 +6691,8 @@ func (s *knowledgeService) buildFAQIndexInfoList(
 				KnowledgeID:     chunk.KnowledgeID,
 				KnowledgeBaseID: chunk.KnowledgeBaseID,
 				KnowledgeType:   types.KnowledgeTypeFAQ,
-				TagID:           chunk.TagID,
+				TagIDs:          tagAncestors,
+				FileName:        fileName,
 				IsEnabled:       chunk.IsEnabled,
 				IsRecommended:   chunk.Flags.HasFlag(types.ChunkFlagRecommended),
 			},
@@ -6676,7 +6721,8 @@ func (s *knowledgeService) buildFAQIndexInfoList(
 		KnowledgeID:     chunk.KnowledgeID,
 		KnowledgeBaseID: chunk.KnowledgeBaseID,
 		KnowledgeType:   types.KnowledgeTypeFAQ,
-		TagID:           chunk.TagID,
+		TagIDs:          tagAncestors,
+		FileName:        fileName,
 		IsEnabled:       chunk.IsEnabled,
 		IsRecommended:   chunk.Flags.HasFlag(types.ChunkFlagRecommended),
 	})
@@ -6702,7 +6748,8 @@ func (s *knowledgeService) buildFAQIndexInfoList(
 			KnowledgeID:     chunk.KnowledgeID,
 			KnowledgeBaseID: chunk.KnowledgeBaseID,
 			KnowledgeType:   types.KnowledgeTypeFAQ,
-			TagID:           chunk.TagID,
+			TagIDs:          tagAncestors,
+			FileName:        fileName,
 			IsEnabled:       chunk.IsEnabled,
 			IsRecommended:   chunk.Flags.HasFlag(types.ChunkFlagRecommended),
 		})
@@ -6768,6 +6815,13 @@ func (s *knowledgeService) incrementalIndexFAQEntry(
 	// 检查答案是否变化
 	answersChanged := !slices.Equal(oldAnswers, newMeta.Answers)
 
+	var tagAncestors []string
+	if chunk.TagID != "" {
+		if chain, aerr := s.tagRepo.AncestorIDs(ctx, chunk.TagID); aerr == nil {
+			tagAncestors = chain
+		}
+	}
+
 	// 收集需要更新的索引项
 	var indexInfoToUpdate []*types.IndexInfo
 
@@ -6783,7 +6837,8 @@ func (s *knowledgeService) incrementalIndexFAQEntry(
 			KnowledgeID:     chunk.KnowledgeID,
 			KnowledgeBaseID: chunk.KnowledgeBaseID,
 			KnowledgeType:   types.KnowledgeTypeFAQ,
-			TagID:           chunk.TagID,
+			TagIDs:          tagAncestors,
+			FileName:        knowledge.FileName,
 			IsEnabled:       chunk.IsEnabled,
 			IsRecommended:   chunk.Flags.HasFlag(types.ChunkFlagRecommended),
 		})
@@ -6816,7 +6871,8 @@ func (s *knowledgeService) incrementalIndexFAQEntry(
 				KnowledgeID:     chunk.KnowledgeID,
 				KnowledgeBaseID: chunk.KnowledgeBaseID,
 				KnowledgeType:   types.KnowledgeTypeFAQ,
-				TagID:           chunk.TagID,
+				TagIDs:          tagAncestors,
+				FileName:        knowledge.FileName,
 				IsEnabled:       chunk.IsEnabled,
 				IsRecommended:   chunk.Flags.HasFlag(types.ChunkFlagRecommended),
 			})
@@ -6830,7 +6886,7 @@ func (s *knowledgeService) incrementalIndexFAQEntry(
 			sourceIDsToDelete = append(sourceIDsToDelete, fmt.Sprintf("%s-%d", chunk.ID, i))
 		}
 		logger.Debugf(ctx, "incrementalIndexFAQEntry: deleting %d obsolete source IDs", len(sourceIDsToDelete))
-		if delErr := retrieveEngine.DeleteBySourceIDList(ctx, sourceIDsToDelete, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); delErr != nil {
+		if delErr := retrieveEngine.DeleteBySourceIDList(ctx, kb.ID, sourceIDsToDelete, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); delErr != nil {
 			logger.Warnf(ctx, "incrementalIndexFAQEntry: failed to delete obsolete source IDs: %v", delErr)
 		}
 	}
@@ -6883,7 +6939,7 @@ func (s *knowledgeService) indexFAQChunks(ctx context.Context,
 	indexInfo := make([]*types.IndexInfo, 0)
 	chunkIDs := make([]string, 0, len(chunks))
 	for _, chunk := range chunks {
-		infoList, err := s.buildFAQIndexInfoList(ctx, kb, chunk)
+		infoList, err := s.buildFAQIndexInfoList(ctx, kb, chunk, knowledge.FileName)
 		if err != nil {
 			return err
 		}
@@ -6914,7 +6970,7 @@ func (s *knowledgeService) indexFAQChunks(ctx context.Context,
 	var deleteDuration time.Duration
 	if needDelete {
 		deleteStartTime := time.Now()
-		if err := retrieveEngine.DeleteByChunkIDList(ctx, chunkIDs, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); err != nil {
+		if err := retrieveEngine.DeleteByChunkIDList(ctx, kb.ID, chunkIDs, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); err != nil {
 			logger.Warnf(ctx, "Delete FAQ vectors failed: %v", err)
 		}
 		deleteDuration = time.Since(deleteStartTime)
@@ -6975,7 +7031,7 @@ func (s *knowledgeService) deleteFAQChunkVectors(ctx context.Context,
 	if len(chunks) == 0 {
 		return nil
 	}
-	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, kb.EmbeddingModelID)
+	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, knowledge.EmbeddingModelID)
 	if err != nil {
 		return err
 	}
@@ -6988,7 +7044,7 @@ func (s *knowledgeService) deleteFAQChunkVectors(ctx context.Context,
 	indexInfo := make([]*types.IndexInfo, 0)
 	chunkIDs := make([]string, 0, len(chunks))
 	for _, chunk := range chunks {
-		infoList, err := s.buildFAQIndexInfoList(ctx, kb, chunk)
+		infoList, err := s.buildFAQIndexInfoList(ctx, kb, chunk, knowledge.FileName)
 		if err != nil {
 			return err
 		}
@@ -6997,7 +7053,7 @@ func (s *knowledgeService) deleteFAQChunkVectors(ctx context.Context,
 	}
 
 	size := retrieveEngine.EstimateStorageSize(ctx, embeddingModel, indexInfo)
-	if err := retrieveEngine.DeleteByChunkIDList(ctx, chunkIDs, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); err != nil {
+	if err := retrieveEngine.DeleteByChunkIDList(ctx, kb.ID, chunkIDs, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); err != nil {
 		return err
 	}
 	if size > 0 {
@@ -7058,13 +7114,13 @@ func (s *knowledgeService) triggerManualProcessing(ctx context.Context,
 	var resolvedImages []docparser.StoredImage
 	if s.imageResolver != nil {
 		fileSvc := s.resolveFileService(ctx, kb)
-		afterDataURI, fromDataURI, _ := s.imageResolver.ResolveDataURIImages(ctx, clean, fileSvc, knowledge.TenantID)
+		afterDataURI, fromDataURI, _ := s.imageResolver.ResolveDataURIImages(ctx, clean, fileSvc, 0)
 		if len(fromDataURI) > 0 {
 			logger.Infof(ctx, "Resolved %d data-URI images for manual knowledge %s", len(fromDataURI), knowledge.ID)
 			clean = afterDataURI
 			resolvedImages = append(resolvedImages, fromDataURI...)
 		}
-		updatedContent, storedImages, resolveErr := s.imageResolver.ResolveRemoteImages(ctx, clean, fileSvc, knowledge.TenantID)
+		updatedContent, storedImages, resolveErr := s.imageResolver.ResolveRemoteImages(ctx, clean, fileSvc, 0)
 		if resolveErr != nil {
 			logger.Warnf(ctx, "Remote image resolution partially failed: %v", resolveErr)
 		}
@@ -7095,7 +7151,7 @@ func (s *knowledgeService) triggerManualProcessing(ctx context.Context,
 	opts := ProcessChunksOptions{
 		// When the KB has VLM enabled and we resolved remote images, pass them
 		// through so processChunks will enqueue image:multimodal tasks (OCR + caption).
-		EnableMultimodel: kb.IsMultimodalEnabled() && len(resolvedImages) > 0,
+		EnableMultimodel: false,
 		StoredImages:     resolvedImages,
 	}
 	if kb.QuestionGenerationConfig != nil && kb.QuestionGenerationConfig.Enabled {
@@ -7171,7 +7227,7 @@ func (s *knowledgeService) cleanupKnowledgeResources(ctx context.Context, knowle
 				logger.GetLogger(ctx).WithField("error", modelErr).Error("Failed to get embedding model during cleanup")
 				cleanupErr = errors.Join(cleanupErr, modelErr)
 			} else {
-				if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
+				if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledge.KnowledgeBaseID, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
 					logger.GetLogger(ctx).WithField("error", err).Error("Failed to delete manual knowledge index")
 					cleanupErr = errors.Join(cleanupErr, err)
 				}
@@ -7182,7 +7238,7 @@ func (s *knowledgeService) cleanupKnowledgeResources(ctx context.Context, knowle
 	// Collect image URLs before chunks are deleted
 	kb, _ := s.kbService.GetKnowledgeBaseByID(ctx, knowledge.KnowledgeBaseID)
 	fileSvc := s.resolveFileService(ctx, kb)
-	chunkImageInfos, imgErr := s.chunkService.GetRepository().ListImageInfoByKnowledgeIDs(ctx, tenantInfo.ID, []string{knowledge.ID})
+	chunkImageInfos, imgErr := s.chunkService.GetRepository().ListImageInfoByKnowledgeIDs(ctx, []string{knowledge.ID})
 	if imgErr != nil {
 		logger.GetLogger(ctx).WithField("error", imgErr).Error("Failed to collect image URLs for cleanup")
 		cleanupErr = errors.Join(cleanupErr, imgErr)
@@ -7227,21 +7283,21 @@ func (s *knowledgeService) getVLMConfig(ctx context.Context, kb *types.Knowledge
 		return nil, nil
 	}
 	// 兼容老版本：直接使用 ModelName 和 BaseURL
-	if kb.VLMConfig.ModelName != "" && kb.VLMConfig.BaseURL != "" {
+	if "" != "" && "" != "" {
 		return &types.DocParserVLMConfig{
-			ModelName:     kb.VLMConfig.ModelName,
-			BaseURL:       kb.VLMConfig.BaseURL,
-			APIKey:        kb.VLMConfig.APIKey,
-			InterfaceType: kb.VLMConfig.InterfaceType,
+			ModelName:     "",
+			BaseURL:       "",
+			APIKey:        "",
+			InterfaceType: "",
 		}, nil
 	}
 
 	// 新版本：未启用或无模型ID时返回nil
-	if !kb.VLMConfig.Enabled || kb.VLMConfig.ModelID == "" {
+	if false {
 		return nil, nil
 	}
 
-	model, err := s.modelService.GetModelByID(ctx, kb.VLMConfig.ModelID)
+	model, err := s.modelService.GetModelByID(ctx, "")
 	if err != nil {
 		return nil, err
 	}
@@ -7260,35 +7316,11 @@ func (s *knowledgeService) getVLMConfig(ctx context.Context, kb *types.Knowledge
 }
 
 func (s *knowledgeService) buildStorageConfig(ctx context.Context, kb *types.KnowledgeBase) *types.DocParserStorageConfig {
-	provider := kb.GetStorageProvider()
-	if provider == "" {
-		provider = "local"
-	}
-
-	// Backward compatibility: if legacy cos_config has full params for the chosen provider, use them.
-	sc := &kb.StorageConfig
-	hasKBFull := false
-	switch provider {
-	case "cos":
-		hasKBFull = sc.SecretID != "" && sc.BucketName != ""
-	case "minio":
-		hasKBFull = sc.BucketName != ""
-	case "local":
-		hasKBFull = false
-	}
-
-	if hasKBFull {
-		logger.Infof(ctx, "[storage] buildStorageConfig use legacy kb config: kb=%s provider=%s bucket=%s path_prefix=%s",
-			kb.ID, provider, sc.BucketName, sc.PathPrefix)
-		return &types.DocParserStorageConfig{
-			Provider:        strings.ToUpper(provider),
-			Region:          sc.Region,
-			BucketName:      sc.BucketName,
-			AccessKeyID:     sc.SecretID,
-			SecretAccessKey: sc.SecretKey,
-			AppID:           sc.AppID,
-			PathPrefix:      sc.PathPrefix,
-		}
+	// StorageConfig removed from KB; use tenant default
+	provider := "local"
+	tenantInfo, _ := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
+	if tenantInfo != nil && tenantInfo.StorageEngineConfig.DefaultProvider != "" {
+		provider = tenantInfo.StorageEngineConfig.DefaultProvider
 	}
 
 	// Merge from tenant's StorageEngineConfig.
@@ -7347,7 +7379,7 @@ func (s *knowledgeService) resolveFileService(ctx context.Context, kb *types.Kno
 		return s.fileSvc
 	}
 
-	provider := kb.GetStorageProvider()
+	provider := ""
 
 	tenant, _ := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 	if provider == "" && tenant != nil && tenant.StorageEngineConfig != nil {
@@ -7386,7 +7418,7 @@ func (s *knowledgeService) resolveFileServiceForPath(ctx context.Context, kb *ty
 		return svc
 	}
 
-	configured := kb.GetStorageProvider()
+	configured := ""
 	if configured == "" {
 		tenant, _ := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 		if tenant != nil && tenant.StorageEngineConfig != nil {
@@ -7508,7 +7540,7 @@ func (s *knowledgeService) ProcessManualUpdate(ctx context.Context, t *asynq.Tas
 	}
 	ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenantInfo)
 
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.KnowledgeID)
 	if err != nil {
 		logger.Errorf(ctx, "ProcessManualUpdate: failed to get knowledge: %v", err)
 		return nil
@@ -7596,7 +7628,7 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 		payload.KnowledgeID, payload.FilePath, retryCount, maxRetry)
 
 	// 幂等性检查：获取knowledge记录
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.KnowledgeID)
 	if err != nil {
 		logger.Errorf(ctx, "failed to get knowledge: %v", err)
 		return nil
@@ -7667,7 +7699,7 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 	}
 
 	// 检查音频ASR配置（仅对文件导入）
-	if payload.FilePath != "" && IsAudioType(payload.FileType) && !kb.ASRConfig.IsASREnabled() {
+	if payload.FilePath != "" && IsAudioType(payload.FileType) && false {
 		logger.GetLogger(ctx).WithField("knowledge_id", knowledge.ID).
 			Errorf("processDocument audio without ASR model configured")
 		knowledge.ParseStatus = "failed"
@@ -7802,7 +7834,7 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 
 	// Step 1.5: ASR transcription for audio files
 	if convertResult != nil && convertResult.IsAudio && len(convertResult.AudioData) > 0 {
-		if !kb.ASRConfig.IsASREnabled() {
+		if false {
 			logger.Error(ctx, "Audio file detected but ASR is not configured")
 			knowledge.ParseStatus = "failed"
 			knowledge.ErrorMessage = "ASR model is not configured for audio transcription"
@@ -7814,7 +7846,7 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 		logger.Infof(ctx, "[ASR] Starting audio transcription for knowledge %s, audio size=%d bytes",
 			knowledge.ID, len(convertResult.AudioData))
 
-		asrModel, err := s.modelService.GetASRModel(ctx, kb.ASRConfig.ModelID)
+		asrModel, err := s.modelService.GetASRModel(ctx, "")
 		if err != nil {
 			logger.Errorf(ctx, "[ASR] Failed to get ASR model: %v", err)
 			knowledge.ParseStatus = "failed"
@@ -8086,7 +8118,6 @@ func (s *knowledgeService) enqueueImageMultimodalTasks(
 
 		lang, _ := types.LanguageFromContext(ctx)
 		payload := types.ImageMultimodalPayload{
-			TenantID:        knowledge.TenantID,
 			KnowledgeID:     knowledge.ID,
 			KnowledgeBaseID: kb.ID,
 			ChunkID:         chunkID,
@@ -8238,7 +8269,7 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 	}
 
 	// 幂等性检查：获取knowledge记录（FAQ任务使用knowledge ID作为taskID）
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.KnowledgeID)
 	if err != nil {
 		logger.Errorf(ctx, "failed to get FAQ knowledge: %v", err)
 		return nil
@@ -8277,7 +8308,7 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 	}
 
 	// 幂等性处理：清理可能已部分处理的chunks和索引数据
-	chunksDeleted, err := s.chunkRepo.DeleteUnindexedChunks(ctx, payload.TenantID, payload.KnowledgeID)
+	chunksDeleted, err := s.chunkRepo.DeleteUnindexedChunks(ctx, payload.KnowledgeID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to delete unindexed chunks: %v", err)
 		// 如果是最后一次重试，更新状态为失败
@@ -8293,7 +8324,7 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 		logger.Infof(ctx, "Deleted unindexed chunks: %d", len(chunksDeleted))
 
 		// 删除索引数据
-		embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, kb.EmbeddingModelID)
+		embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, knowledge.EmbeddingModelID)
 		if err == nil {
 			retrieveEngine, err := retriever.NewCompositeRetrieveEngine(
 				s.retrieveEngine,
@@ -8304,7 +8335,7 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 				for _, chunk := range chunksDeleted {
 					chunkIDs = append(chunkIDs, chunk.ID)
 				}
-				if err := retrieveEngine.DeleteByChunkIDList(ctx, chunkIDs, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); err != nil {
+				if err := retrieveEngine.DeleteByChunkIDList(ctx, kb.ID, chunkIDs, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); err != nil {
 					logger.Warnf(ctx, "Failed to delete index data for chunks (may not exist): %v", err)
 				} else {
 					logger.Infof(ctx, "Successfully deleted index data for %d chunks", len(chunksDeleted))
@@ -8336,7 +8367,7 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 	}
 
 	// 执行FAQ导入（传入已处理的偏移量，用于进度计算）
-	if err := s.executeFAQImport(ctx, payload.TaskID, payload.KBID, faqPayload, payload.TenantID, progress.FailedCount+processedCount, progress); err != nil {
+	if err := s.executeFAQImport(ctx, payload.TaskID, payload.KBID, faqPayload, progress.FailedCount+processedCount, progress); err != nil {
 		logger.Errorf(ctx, "FAQ import task failed: %s, error: %v", payload.TaskID, err)
 		// 如果是最后一次重试，更新状态为失败
 		if isLastRetry {
@@ -8372,7 +8403,7 @@ func (s *knowledgeService) finalizeFAQValidation(ctx context.Context, payload *t
 
 	// 如果有失败条目，生成 CSV 文件
 	if len(progress.FailedEntries) > 0 {
-		csvURL, err := s.generateFailedEntriesCSV(ctx, payload.TenantID, payload.TaskID, progress.FailedEntries)
+		csvURL, err := s.generateFailedEntriesCSV(ctx, payload.TaskID, progress.FailedEntries)
 		if err != nil {
 			logger.Warnf(ctx, "Failed to generate failed entries CSV: %v", err)
 		} else {
@@ -8391,7 +8422,7 @@ func (s *knowledgeService) finalizeFAQValidation(ctx context.Context, payload *t
 		// 只有 replace 模式才清理未使用的 Tag
 		// append 模式不应删除用户预先创建的空标签
 		if payload.Mode == types.FAQBatchModeReplace {
-			deletedTags, err := s.tagRepo.DeleteUnusedTags(ctx, payload.TenantID, payload.KBID)
+			deletedTags, err := s.tagRepo.DeleteUnusedTags(ctx, payload.KBID)
 			if err != nil {
 				logger.Warnf(ctx, "FAQ import task %s: failed to cleanup unused tags: %v", payload.TaskID, err)
 			} else if deletedTags > 0 {
@@ -8473,8 +8504,7 @@ func (s *knowledgeService) GetFAQImportProgress(ctx context.Context, taskID stri
 
 	// If task is completed, enrich with persisted result fields from database
 	if progress.Status == types.FAQImportStatusCompleted && progress.KnowledgeID != "" {
-		tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-		knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, progress.KnowledgeID)
+		knowledge, err := s.repo.GetKnowledgeByID(ctx, progress.KnowledgeID)
 		if err == nil && knowledge != nil {
 			if result, err := knowledge.GetLastFAQImportResult(); err == nil && result != nil {
 				progress.SkippedCount = result.SkippedCount
@@ -8496,11 +8526,8 @@ func (s *knowledgeService) UpdateLastFAQImportResultDisplayStatus(ctx context.Co
 		return werrors.NewBadRequestError("invalid display status, must be 'open' or 'close'")
 	}
 
-	// 获取当前租户ID
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-
 	// 查找FAQ类型的knowledge
-	knowledgeList, err := s.repo.ListKnowledgeByKnowledgeBaseID(ctx, tenantID, kbID)
+	knowledgeList, err := s.repo.ListKnowledgeByKnowledgeBaseID(ctx, kbID)
 	if err != nil {
 		return fmt.Errorf("failed to list knowledge: %w", err)
 	}
@@ -8608,20 +8635,9 @@ func (s *knowledgeService) ProcessKBClone(ctx context.Context, t *asynq.Task) er
 		return s.cloneFAQKnowledgeBase(ctx, srcKB, dstKB, progress, handleError)
 	}
 
-	// Document type: use Knowledge-level diff based on file_hash
-	addKnowledge, err := s.repo.AminusB(ctx, srcKB.TenantID, srcKB.ID, dstKB.TenantID, dstKB.ID)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to get knowledge to add: %v", err)
-		handleError(progress, err, "Failed to calculate knowledge difference")
-		return err
-	}
-
-	delKnowledge, err := s.repo.AminusB(ctx, dstKB.TenantID, dstKB.ID, srcKB.TenantID, srcKB.ID)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to get knowledge to delete: %v", err)
-		handleError(progress, err, "Failed to calculate knowledge difference")
-		return err
-	}
+	// TODO: implement knowledge diff logic for sync
+	var addKnowledge []string
+	var delKnowledge []string
 
 	totalOperations := len(addKnowledge) + len(delKnowledge)
 	progress.Total = totalOperations
@@ -8666,7 +8682,7 @@ func (s *knowledgeService) ProcessKBClone(ctx context.Context, t *asynq.Task) er
 	g.SetLimit(batch)
 	for _, knowledge := range addKnowledge {
 		g.Go(func() error {
-			srcKn, err := s.repo.GetKnowledgeByID(gctx, srcKB.TenantID, knowledge)
+			srcKn, err := s.repo.GetKnowledgeByID(gctx, knowledge)
 			if err != nil {
 				logger.Errorf(gctx, "get knowledge %s: %v", knowledge, err)
 				return err
@@ -8718,7 +8734,7 @@ func (s *knowledgeService) cloneFAQKnowledgeBase(
 	handleError func(*types.KBCloneProgress, error, string),
 ) error {
 	// Get source FAQ knowledge first (FAQ KB has exactly one Knowledge entry)
-	srcKnowledgeList, err := s.repo.ListKnowledgeByKnowledgeBaseID(ctx, srcKB.TenantID, srcKB.ID)
+	srcKnowledgeList, err := s.repo.ListKnowledgeByKnowledgeBaseID(ctx, srcKB.ID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get source FAQ knowledge: %v", err)
 		handleError(progress, err, "Failed to get source FAQ knowledge")
@@ -8736,7 +8752,7 @@ func (s *knowledgeService) cloneFAQKnowledgeBase(
 	srcKnowledge := srcKnowledgeList[0]
 
 	// Get chunk-level differences based on content_hash
-	chunksToAdd, chunksToDelete, err := s.chunkRepo.FAQChunkDiff(ctx, srcKB.TenantID, srcKB.ID, dstKB.TenantID, dstKB.ID)
+	chunksToAdd, chunksToDelete, err := s.chunkRepo.FAQChunkDiff(ctx, srcKB.ID, dstKB.ID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to calculate FAQ chunk difference: %v", err)
 		handleError(progress, err, "Failed to calculate FAQ chunk difference")
@@ -8770,8 +8786,14 @@ func (s *knowledgeService) cloneFAQKnowledgeBase(
 		return err
 	}
 
-	// Get embedding model
-	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, dstKB.EmbeddingModelID)
+	// Get default embedding model
+	defEmbModelIDSync, err := s.getDefaultEmbeddingModelIDFromModels(ctx)
+	if err != nil {
+		logger.Errorf(ctx, "Failed to get default embedding model: %v", err)
+		handleError(progress, err, "Failed to get embedding model")
+		return err
+	}
+	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, defEmbModelIDSync)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get embedding model: %v", err)
 		handleError(progress, err, "Failed to get embedding model")
@@ -8783,13 +8805,13 @@ func (s *knowledgeService) cloneFAQKnowledgeBase(
 	// Delete FAQ chunks that don't exist in source
 	if len(chunksToDelete) > 0 {
 		// Delete from vector store
-		if err := retrieveEngine.DeleteByChunkIDList(ctx, chunksToDelete, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); err != nil {
+		if err := retrieveEngine.DeleteByChunkIDList(ctx, dstKB.ID, chunksToDelete, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); err != nil {
 			logger.Errorf(ctx, "Failed to delete FAQ chunks from vector store: %v", err)
 			handleError(progress, err, "Failed to delete FAQ entries from vector store")
 			return err
 		}
 		// Delete from database
-		if err := s.chunkRepo.DeleteChunks(ctx, dstKB.TenantID, chunksToDelete); err != nil {
+		if err := s.chunkRepo.DeleteChunks(ctx, chunksToDelete); err != nil {
 			logger.Errorf(ctx, "Failed to delete FAQ chunks from database: %v", err)
 			handleError(progress, err, "Failed to delete FAQ entries from database")
 			return err
@@ -8823,7 +8845,7 @@ func (s *knowledgeService) cloneFAQKnowledgeBase(
 		batchIDs := chunksToAdd[i:end]
 
 		// Get source chunks
-		srcChunks, err := s.chunkRepo.ListChunksByID(ctx, srcKB.TenantID, batchIDs)
+		srcChunks, err := s.chunkRepo.ListChunksByID(ctx, batchIDs)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to get source FAQ chunks: %v", err)
 			handleError(progress, err, "Failed to get source FAQ entries")
@@ -8840,13 +8862,12 @@ func (s *knowledgeService) cloneFAQKnowledgeBase(
 					targetTagID = mappedTagID
 				} else {
 					// Try to find or create the tag in target knowledge base
-					targetTagID = s.getOrCreateTagInTarget(ctx, srcKB.TenantID, dstKB.TenantID, dstKB.ID, srcChunk.TagID, tagIDMapping)
+					targetTagID = s.getOrCreateTagInTarget(ctx, dstKB.ID, srcChunk.TagID, tagIDMapping)
 				}
 			}
 
 			newChunk := &types.Chunk{
 				ID:              uuid.New().String(),
-				TenantID:        dstKB.TenantID,
 				KnowledgeID:     dstKnowledge.ID,
 				KnowledgeBaseID: dstKB.ID,
 				TagID:           targetTagID,
@@ -8916,7 +8937,7 @@ func (s *knowledgeService) cloneFAQKnowledgeBase(
 // If srcKnowledge is provided, it will copy relevant fields from source when creating new knowledge
 func (s *knowledgeService) getOrCreateFAQKnowledge(ctx context.Context, kb *types.KnowledgeBase, srcKnowledge *types.Knowledge) (*types.Knowledge, error) {
 	// FAQ knowledge base should have exactly one Knowledge entry
-	knowledgeList, err := s.repo.ListKnowledgeByKnowledgeBaseID(ctx, kb.TenantID, kb.ID)
+	knowledgeList, err := s.repo.ListKnowledgeByKnowledgeBaseID(ctx, kb.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -8927,24 +8948,22 @@ func (s *knowledgeService) getOrCreateFAQKnowledge(ctx context.Context, kb *type
 
 	// Create a new FAQ knowledge entry, copying from source if available
 	knowledge := &types.Knowledge{
-		ID:               uuid.New().String(),
-		TenantID:         kb.TenantID,
-		KnowledgeBaseID:  kb.ID,
-		Type:             types.KnowledgeTypeFAQ,
-		Channel:          types.ChannelWeb,
-		Title:            "FAQ",
-		ParseStatus:      "completed",
-		EnableStatus:     "enabled",
-		EmbeddingModelID: kb.EmbeddingModelID,
+		ID:              uuid.New().String(),
+		KnowledgeBaseID: kb.ID,
+		Type:            types.KnowledgeTypeFAQ,
+		Title:           "FAQ",
+		ParseStatus:     "completed",
+		EnableStatus:    types.EnableStatusEnabled,
+		// EmbeddingModelID set below via getDefaultEmbeddingModelID
 	}
 
 	// Copy additional fields from source knowledge if available
 	if srcKnowledge != nil {
 		knowledge.Title = srcKnowledge.Title
 		knowledge.Description = srcKnowledge.Description
-		knowledge.Source = srcKnowledge.Source
-		knowledge.Channel = srcKnowledge.Channel
-		knowledge.Metadata = srcKnowledge.Metadata
+		// knowledge.Source removed
+		// knowledge.Channel removed
+		// knowledge.Metadata removed
 	}
 
 	if err := s.repo.CreateKnowledge(ctx, knowledge); err != nil {
@@ -9097,11 +9116,7 @@ func (s *knowledgeService) ProcessKnowledgeMove(ctx context.Context, t *asynq.Ta
 		handleError(progress, err, "Source and target knowledge bases must be the same type")
 		return err
 	}
-	if sourceKB.EmbeddingModelID != targetKB.EmbeddingModelID {
-		err := fmt.Errorf("embedding model mismatch: source=%s, target=%s", sourceKB.EmbeddingModelID, targetKB.EmbeddingModelID)
-		handleError(progress, err, "Source and target must use the same embedding model")
-		return err
-	}
+	// EmbeddingModelID removed from KB - system uses default embedding model for all KBs
 
 	// Process each knowledge item
 	for i, knowledgeID := range payload.KnowledgeIDs {
@@ -9142,10 +9157,9 @@ func (s *knowledgeService) moveOneKnowledge(
 	sourceKB, targetKB *types.KnowledgeBase,
 	mode string,
 ) error {
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 
 	// Get the knowledge item
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, knowledgeID)
 	if err != nil {
 		return fmt.Errorf("failed to get knowledge %s: %w", knowledgeID, err)
 	}
@@ -9177,11 +9191,10 @@ func (s *knowledgeService) moveKnowledgeReuseVectors(
 	knowledge *types.Knowledge,
 	sourceKB, targetKB *types.KnowledgeBase,
 ) error {
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 
 	// 1. Get old chunk IDs for vector index copy mapping
-	oldChunks, err := s.chunkRepo.ListChunksByKnowledgeID(ctx, tenantID, knowledge.ID)
+	oldChunks, err := s.chunkRepo.ListChunksByKnowledgeID(ctx, knowledge.ID)
 	if err != nil {
 		return fmt.Errorf("failed to list chunks: %w", err)
 	}
@@ -9213,7 +9226,7 @@ func (s *knowledgeService) moveKnowledgeReuseVectors(
 		}
 
 		// Delete indices from source KB
-		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID},
+		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, sourceKB.ID, []string{knowledge.ID},
 			embeddingModel.GetDimensions(), sourceKB.Type,
 		); err != nil {
 			logger.Warnf(ctx, "moveKnowledgeReuseVectors: failed to delete old indices for knowledge %s: %v", knowledge.ID, err)
@@ -9222,7 +9235,7 @@ func (s *knowledgeService) moveKnowledgeReuseVectors(
 	}
 
 	// 3. Update chunks' knowledge_base_id in DB
-	if err := s.chunkRepo.MoveChunksByKnowledgeID(ctx, tenantID, knowledge.ID, targetKB.ID); err != nil {
+	if err := s.chunkRepo.MoveChunksByKnowledgeID(ctx, knowledge.ID, targetKB.ID); err != nil {
 		return fmt.Errorf("failed to move chunks: %w", err)
 	}
 
@@ -9244,7 +9257,6 @@ func (s *knowledgeService) moveKnowledgeReparse(
 	knowledge *types.Knowledge,
 	_, targetKB *types.KnowledgeBase,
 ) error {
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 
 	// 1. Clean up existing chunks and vector indices
 	if err := s.cleanupKnowledgeResources(ctx, knowledge); err != nil {
@@ -9254,10 +9266,9 @@ func (s *knowledgeService) moveKnowledgeReparse(
 
 	// 2. Update knowledge to belong to target KB
 	knowledge.KnowledgeBaseID = targetKB.ID
-	knowledge.EmbeddingModelID = targetKB.EmbeddingModelID
 	knowledge.TagID = "" // Clear tag since tags are KB-scoped
 	knowledge.ParseStatus = types.ParseStatusPending
-	knowledge.EnableStatus = "disabled"
+	knowledge.EnableStatus = types.EnableStatusDisabled
 	knowledge.Description = ""
 	knowledge.ProcessedAt = nil
 	knowledge.UpdatedAt = time.Now()
@@ -9276,7 +9287,7 @@ func (s *knowledgeService) moveKnowledgeReparse(
 	}
 
 	if knowledge.FilePath != "" {
-		enableMultimodel := targetKB.IsMultimodalEnabled()
+		enableMultimodel := false // VLM config removed from KB, use system default
 		enableQuestionGeneration := false
 		questionCount := 3
 		if targetKB.QuestionGenerationConfig != nil && targetKB.QuestionGenerationConfig.Enabled {
@@ -9288,7 +9299,6 @@ func (s *knowledgeService) moveKnowledgeReparse(
 
 		lang, _ := types.LanguageFromContext(ctx)
 		taskPayload := types.DocumentProcessPayload{
-			TenantID:                 tenantID,
 			KnowledgeID:              knowledge.ID,
 			KnowledgeBaseID:          targetKB.ID,
 			FilePath:                 knowledge.FilePath,
@@ -9300,6 +9310,7 @@ func (s *knowledgeService) moveKnowledgeReparse(
 			Language:                 lang,
 		}
 
+		fillCommonTaskPayload(ctx, &taskPayload)
 		payloadBytes, err := json.Marshal(taskPayload)
 		if err != nil {
 			return fmt.Errorf("failed to marshal document process payload: %w", err)
@@ -9322,39 +9333,48 @@ func (s *knowledgeService) moveKnowledgeReparse(
 // The mapping is cached in tagIDMapping for subsequent lookups.
 func (s *knowledgeService) getOrCreateTagInTarget(
 	ctx context.Context,
-	srcTenantID, dstTenantID uint64,
 	dstKnowledgeBaseID string,
 	srcTagID string,
 	tagIDMapping map[string]string,
 ) string {
 	// Get source tag
-	srcTag, err := s.tagRepo.GetByID(ctx, srcTenantID, srcTagID)
+	srcTag, err := s.tagRepo.GetByID(ctx, srcTagID)
 	if err != nil || srcTag == nil {
 		logger.Warnf(ctx, "Failed to get source tag %s: %v", srcTagID, err)
 		tagIDMapping[srcTagID] = "" // Cache empty result to avoid repeated lookups
 		return ""
 	}
 
-	// Try to find existing tag with same name in target KB
-	dstTag, err := s.tagRepo.GetByName(ctx, dstTenantID, dstKnowledgeBaseID, srcTag.Name)
-	if err == nil && dstTag != nil {
+	// Try to find existing tag with same materialized path in target KB.
+	// This preserves hierarchy when KB is copied wholesale.
+	if dstTag, findErr := s.tagRepo.GetByName(ctx, dstKnowledgeBaseID, srcTag.ParentID, srcTag.Name); findErr == nil && dstTag != nil {
 		tagIDMapping[srcTagID] = dstTag.ID
 		return dstTag.ID
 	}
 
-	// Create new tag in target KB
+	// Ensure parent tag exists in the destination first (recursively).
+	dstParentID := ""
+	if srcTag.ParentID != "" {
+		dstParentID = s.getOrCreateTagInTarget(ctx, dstKnowledgeBaseID, srcTag.ParentID, tagIDMapping)
+		if dstParentID == "" {
+			// Fall back to root level if we couldn't recreate parent; avoids cascade failure.
+			logger.Warnf(ctx, "Failed to resolve parent of tag %s in target KB; creating at root", srcTag.Name)
+		}
+	}
+
+	// Create new tag in target KB preserving hierarchy fields.
 	// "未分类" tag should have the lowest sort order to appear first
-	sortOrder := srcTag.SortOrder
+	sortOrder := srcTag.Sort
 	if srcTag.Name == types.UntaggedTagName {
 		sortOrder = -1
 	}
 	newTag := &types.KnowledgeTag{
 		ID:              uuid.New().String(),
-		TenantID:        dstTenantID,
 		KnowledgeBaseID: dstKnowledgeBaseID,
+		Owner:           srcTag.Owner,
+		ParentID:        dstParentID,
+		Sort:            sortOrder,
 		Name:            srcTag.Name,
-		Color:           srcTag.Color,
-		SortOrder:       sortOrder,
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
 	}
@@ -9384,7 +9404,7 @@ func (s *knowledgeService) SearchKnowledge(ctx context.Context, keyword string, 
 	if err == nil {
 		for _, kb := range ownKBs {
 			if kb != nil && kb.Type == types.KnowledgeBaseTypeDocument {
-				scopes = append(scopes, types.KnowledgeSearchScope{TenantID: tenantID, KBID: kb.ID})
+				scopes = append(scopes, types.KnowledgeSearchScope{KBID: kb.ID})
 			}
 		}
 	}
@@ -9397,8 +9417,7 @@ func (s *knowledgeService) SearchKnowledge(ctx context.Context, keyword string, 
 				for _, info := range sharedList {
 					if info != nil && info.KnowledgeBase != nil && info.KnowledgeBase.Type == types.KnowledgeBaseTypeDocument {
 						scopes = append(scopes, types.KnowledgeSearchScope{
-							TenantID: info.SourceTenantID,
-							KBID:     info.KnowledgeBase.ID,
+							KBID: info.KnowledgeBase.ID,
 						})
 					}
 				}

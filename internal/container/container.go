@@ -47,7 +47,6 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service/llmcontext"
 	memoryService "github.com/Tencent/WeKnora/internal/application/service/memory"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
-	infra_web_search "github.com/Tencent/WeKnora/internal/infrastructure/web_search"
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/database"
 	"github.com/Tencent/WeKnora/internal/datasource"
@@ -63,6 +62,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/im/telegram"
 	"github.com/Tencent/WeKnora/internal/im/wecom"
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
+	infra_web_search "github.com/Tencent/WeKnora/internal/infrastructure/web_search"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/mcp"
 	"github.com/Tencent/WeKnora/internal/models/embedding"
@@ -131,6 +131,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(repository.NewKnowledgeRepository))
 	must(container.Provide(repository.NewChunkRepository))
 	must(container.Provide(repository.NewKnowledgeTagRepository))
+	must(container.Provide(repository.NewKnowledgeTagShareRepository))
 	must(container.Provide(repository.NewSessionRepository))
 	must(container.Provide(repository.NewMessageRepository))
 	must(container.Provide(repository.NewModelRepository))
@@ -485,7 +486,7 @@ func initDatabase(cfg *config.Config) (*gorm.DB, error) {
 }
 
 // resolveStorageProviderPending replaces the "__pending_env__" sentinel in
-// knowledge_bases.storage_provider_config with the actual STORAGE_TYPE from the environment.
+// knowledge_base.storage_provider_config with the actual STORAGE_TYPE from the environment.
 // This runs once after SQL migrations to bind historical KBs to their real storage provider.
 func resolveStorageProviderPending(db *gorm.DB) {
 	storageType := strings.TrimSpace(os.Getenv("STORAGE_TYPE"))
@@ -495,7 +496,7 @@ func resolveStorageProviderPending(db *gorm.DB) {
 	storageType = strings.ToLower(storageType)
 
 	result := db.Exec(
-		`UPDATE knowledge_bases SET storage_provider_config = ? WHERE storage_provider_config IS NOT NULL AND storage_provider_config->>'provider' = '__pending_env__'`,
+		`UPDATE knowledge_base SET storage_provider_config = ? WHERE storage_provider_config IS NOT NULL AND storage_provider_config->>'provider' = '__pending_env__'`,
 		fmt.Sprintf(`{"provider":"%s"}`, storageType),
 	)
 	if result.Error != nil {
@@ -612,10 +613,13 @@ func initFileService(cfg *config.Config) (interfaces.FileService, error) {
 // Returns:
 //   - Configured retrieval engine registry
 //   - Error if initialization fails
-func initRetrieveEngineRegistry(db *gorm.DB, cfg *config.Config) (interfaces.RetrieveEngineRegistry, error) {
+func initRetrieveEngineRegistry(db *gorm.DB, cfg *config.Config) (interfaces.RetrieveEngineRegistry, interfaces.SummaryIndex, error) {
 	registry := retriever.NewRetrieveEngineRegistry()
 	retrieveDriver := strings.Split(os.Getenv("RETRIEVE_DRIVER"), ",")
 	log := logger.GetLogger(context.Background())
+	// summaryIndex falls back to a no-op when no backend registers itself as
+	// a SummaryIndex (e.g. milvus driver is not enabled).
+	var summaryIndex interfaces.SummaryIndex = NewNoopSummaryIndex()
 
 	if slices.Contains(retrieveDriver, "postgres") {
 		postgresRepo := postgresRepo.NewPostgresRetrieveEngineRepository(db)
@@ -796,7 +800,7 @@ func initRetrieveEngineRegistry(db *gorm.DB, cfg *config.Config) (interfaces.Ret
 		if err != nil {
 			log.Errorf("Create milvus client failed: %v", err)
 		} else {
-			milvusRepository := milvusRepo.NewMilvusRetrieveEngineRepository(milvusCli)
+			milvusRepository := milvusRepo.NewMilvusRetrieveEngineRepository(milvusCli, repository.NewKnowledgeBaseRepository(db))
 			if err := registry.Register(
 				retriever.NewKVHybridRetrieveEngine(
 					milvusRepository, types.MilvusRetrieverEngineType,
@@ -806,9 +810,34 @@ func initRetrieveEngineRegistry(db *gorm.DB, cfg *config.Config) (interfaces.Ret
 			} else {
 				log.Infof("Register milvus retrieve engine success")
 			}
+			// Milvus repository also implements SummaryIndex — expose it so
+			// KnowledgeService can write / query the global weknora_summary
+			// collection without needing a second client instance.
+			if si, ok := milvusRepository.(interfaces.SummaryIndex); ok {
+				summaryIndex = si
+				log.Infof("Register milvus summary index success")
+				// Startup self-check: verify whether the global weknora_summary
+				// collection already exists and surface its dimension in the
+				// startup logs so operators can spot mismatches early.
+				inspectCtx, inspectCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				exists, dim, inspectErr := si.InspectSummaryCollection(inspectCtx)
+				inspectCancel()
+				switch {
+				case inspectErr != nil:
+					log.Warnf("[SummaryIndex] startup self-check failed: %v", inspectErr)
+				case !exists:
+					log.Infof("[SummaryIndex] weknora_summary collection not yet created; will be provisioned on first upsert")
+				case dim <= 0:
+					log.Warnf("[SummaryIndex] weknora_summary exists but its vector dimension could not be read")
+				default:
+					log.Infof("[SummaryIndex] weknora_summary collection ready, dimension=%d", dim)
+				}
+			} else {
+				log.Warnf("Milvus repository does not implement SummaryIndex; falling back to noop")
+			}
 		}
 	}
-	return registry, nil
+	return registry, summaryIndex, nil
 }
 
 // initAntsPool initializes the goroutine pool

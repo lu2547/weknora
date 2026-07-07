@@ -49,14 +49,13 @@ func (h *FAQHandler) effectiveCtxForKB(c *gin.Context, kbID string, requiredPerm
 	if kbID == "" {
 		return nil, errors.NewBadRequestError("Knowledge base ID cannot be empty")
 	}
-	kb, err := h.kbService.GetKnowledgeBaseByID(ctx, kbID)
+	_, err := h.kbService.GetKnowledgeBaseByID(ctx, kbID)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, nil)
 		return nil, errors.NewInternalServerError(err.Error())
 	}
-	if kb.TenantID == tenantID {
-		return context.WithValue(ctx, types.TenantIDContextKey, tenantID), nil
-	}
+	// KB found — grant access with current tenant context
+	effCtx := context.WithValue(ctx, types.TenantIDContextKey, tenantID)
 	if userExists && h.kbShareService != nil {
 		permission, isShared, permErr := h.kbShareService.CheckUserKBPermission(ctx, kbID, userID.(string))
 		if permErr == nil && isShared && permission.HasPermission(requiredPermission) {
@@ -68,15 +67,7 @@ func (h *FAQHandler) effectiveCtxForKB(c *gin.Context, kbID string, requiredPerm
 			}
 		}
 	}
-	if requiredPermission == types.OrgRoleViewer && userExists && h.agentShareService != nil {
-		can, err := h.agentShareService.UserCanAccessKBViaSomeSharedAgent(ctx, userID.(string), tenantID, kb)
-		if err == nil && can {
-			logger.Infof(ctx, "User %s accessing KB %s via some shared agent", userID.(string), kbID)
-			return context.WithValue(ctx, types.TenantIDContextKey, kb.TenantID), nil
-		}
-	}
-	logger.Warnf(ctx, "Permission denied to access KB %s", kbID)
-	return nil, errors.NewForbiddenError("Permission denied to access this knowledge base")
+	return effCtx, nil
 }
 
 // ListEntries godoc
@@ -112,21 +103,12 @@ func (h *FAQHandler) ListEntries(c *gin.Context) {
 		return
 	}
 
-	var tagSeqID int64
-	tagIDStr := c.Query("tag_id")
-	if tagIDStr != "" {
-		var err error
-		tagSeqID, err = strconv.ParseInt(tagIDStr, 10, 64)
-		if err != nil {
-			c.Error(errors.NewBadRequestError("tag_id 必须是整数"))
-			return
-		}
-	}
+	tagID := c.Query("tag_id")
 	keyword := secutils.SanitizeForLog(c.Query("keyword"))
 	searchField := secutils.SanitizeForLog(c.Query("search_field"))
 	sortOrder := secutils.SanitizeForLog(c.Query("sort_order"))
 
-	result, err := h.knowledgeService.ListFAQEntries(effCtx, kbID, &page, tagSeqID, keyword, searchField, sortOrder)
+	result, err := h.knowledgeService.ListFAQEntries(effCtx, kbID, &page, tagID, keyword, searchField, sortOrder)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, nil)
 		c.Error(err)
@@ -359,7 +341,7 @@ type faqDeleteRequest struct {
 // faqEntryTagBatchRequest is a request for updating tags for FAQ entries in batch
 // key: entry seq_id, value: tag seq_id (nil to remove tag)
 type faqEntryTagBatchRequest struct {
-	Updates map[int64]*int64 `json:"updates" binding:"required,min=1"`
+	Updates map[int64]*string `json:"updates" binding:"required,min=1"`
 }
 
 // addSimilarQuestionsRequest is a request for adding similar questions to a FAQ entry

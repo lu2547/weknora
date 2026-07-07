@@ -231,7 +231,7 @@ type FAQEntry struct {
 	ChunkID           string         `json:"chunk_id"`
 	KnowledgeID       string         `json:"knowledge_id"`
 	KnowledgeBaseID   string         `json:"knowledge_base_id"`
-	TagID             int64          `json:"tag_id"`
+	TagID             string         `json:"tag_id"`
 	TagName           string         `json:"tag_name"`
 	IsEnabled         bool           `json:"is_enabled"`
 	IsRecommended     bool           `json:"is_recommended"`
@@ -260,7 +260,7 @@ type FAQEntryPayload struct {
 	NegativeQuestions []string        `json:"negative_questions"`
 	Answers           []string        `json:"answers"`
 	AnswerStrategy    *AnswerStrategy `json:"answer_strategy,omitempty"`
-	TagID             int64           `json:"tag_id"`
+	TagID             string          `json:"tag_id"`
 	TagName           string          `json:"tag_name"`
 	IsEnabled         *bool           `json:"is_enabled,omitempty"`
 	IsRecommended     *bool           `json:"is_recommended,omitempty"`
@@ -301,7 +301,7 @@ type FAQFailedEntry struct {
 type FAQSuccessEntry struct {
 	Index            int    `json:"index"`              // 条目在批次中的索引（从0开始）
 	SeqID            int64  `json:"seq_id"`             // 导入后的条目序列ID
-	TagID            int64  `json:"tag_id,omitempty"`   // 分类ID（seq_id）
+	TagID            string `json:"tag_id,omitempty"`   // 分类ID
 	TagName          string `json:"tag_name,omitempty"` // 分类名称
 	StandardQuestion string `json:"standard_question"`  // 标准问题
 }
@@ -317,12 +317,12 @@ type FAQDryRunResult struct {
 
 // FAQSearchRequest FAQ检索请求参数
 type FAQSearchRequest struct {
-	QueryText            string  `json:"query_text"             binding:"required"`
-	VectorThreshold      float64 `json:"vector_threshold"`
-	MatchCount           int     `json:"match_count"`
-	FirstPriorityTagIDs  []int64 `json:"first_priority_tag_ids"`  // 第一优先级标签ID列表，限定命中范围，优先级最高
-	SecondPriorityTagIDs []int64 `json:"second_priority_tag_ids"` // 第二优先级标签ID列表，限定命中范围，优先级低于第一优先级
-	OnlyRecommended      bool    `json:"only_recommended"`        // 是否仅返回推荐的条目
+	QueryText            string   `json:"query_text"             binding:"required"`
+	VectorThreshold      float64  `json:"vector_threshold"`
+	MatchCount           int      `json:"match_count"`
+	FirstPriorityTagIDs  []string `json:"first_priority_tag_ids"`  // 第一优先级标签ID列表（UUID），限定命中范围，优先级最高
+	SecondPriorityTagIDs []string `json:"second_priority_tag_ids"` // 第二优先级标签ID列表（UUID），限定命中范围，优先级低于第一优先级
+	OnlyRecommended      bool     `json:"only_recommended"`        // 是否仅返回推荐的条目
 }
 
 // UntaggedTagName is the default tag name for entries without a tag
@@ -330,9 +330,9 @@ const UntaggedTagName = "未分类"
 
 // FAQEntryFieldsUpdate 单个FAQ条目的字段更新
 type FAQEntryFieldsUpdate struct {
-	IsEnabled     *bool  `json:"is_enabled,omitempty"`
-	IsRecommended *bool  `json:"is_recommended,omitempty"`
-	TagID         *int64 `json:"tag_id,omitempty"`
+	IsEnabled     *bool   `json:"is_enabled,omitempty"`
+	IsRecommended *bool   `json:"is_recommended,omitempty"`
+	TagID         *string `json:"tag_id,omitempty"`
 	// 后续可扩展更多字段
 }
 
@@ -343,8 +343,8 @@ type FAQEntryFieldsUpdate struct {
 type FAQEntryFieldsBatchUpdate struct {
 	// ByID 按条目ID更新，key为条目ID (seq_id)
 	ByID map[int64]FAQEntryFieldsUpdate `json:"by_id,omitempty"`
-	// ByTag 按Tag批量更新，key为TagID (seq_id)
-	ByTag map[int64]FAQEntryFieldsUpdate `json:"by_tag,omitempty"`
+	// ByTag 按Tag批量更新，key为TagID (UUID string)
+	ByTag map[string]FAQEntryFieldsUpdate `json:"by_tag,omitempty"`
 	// ExcludeIDs 在ByTag操作中需要排除的ID列表 (seq_id)
 	ExcludeIDs []int64 `json:"exclude_ids,omitempty"`
 }
@@ -449,18 +449,6 @@ func (r *FAQImportResult) ToJSON() (JSON, error) {
 		return nil, err
 	}
 	return JSON(bytes), nil
-}
-
-// ParseFAQImportMetadata parses FAQ import metadata from Knowledge.
-func ParseFAQImportMetadata(k *Knowledge) (*FAQImportMetadata, error) {
-	if k == nil || len(k.Metadata) == 0 {
-		return nil, nil
-	}
-	var metadata FAQImportMetadata
-	if err := json.Unmarshal(k.Metadata, &metadata); err != nil {
-		return nil, err
-	}
-	return &metadata, nil
 }
 
 // normalizeQuestionStrings 对问题列表进行归一化处理

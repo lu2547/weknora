@@ -230,8 +230,7 @@ func (s *sessionService) selectChatModelID(
 ) (string, error) {
 	// If no knowledge base IDs but have knowledge IDs, derive KB IDs from knowledge IDs (include shared KB files)
 	if len(knowledgeBaseIDs) == 0 && len(knowledgeIDs) > 0 {
-		tenantID := types.MustTenantIDFromContext(ctx)
-		knowledgeList, err := s.knowledgeService.GetKnowledgeBatchWithSharedAccess(ctx, tenantID, knowledgeIDs)
+		knowledgeList, err := s.knowledgeService.GetKnowledgeBatchWithSharedAccess(ctx, knowledgeIDs)
 		if err != nil {
 			logger.Warnf(ctx, "Failed to get knowledge batch for model selection: %v", err)
 		} else {
@@ -251,37 +250,8 @@ func (s *sessionService) selectChatModelID(
 	}
 	// Check knowledge bases for models
 	if len(knowledgeBaseIDs) > 0 {
-		// Try to find a knowledge base with Remote model
-		for _, kbID := range knowledgeBaseIDs {
-			kb, err := s.knowledgeBaseService.GetKnowledgeBaseByID(ctx, kbID)
-			if err != nil {
-				logger.Warnf(ctx, "Failed to get knowledge base: %v", err)
-				continue
-			}
-			if kb != nil && kb.SummaryModelID != "" {
-				model, err := s.modelService.GetModelByID(ctx, kb.SummaryModelID)
-				if err == nil && model != nil && model.Source == types.ModelSourceRemote {
-					logger.Info(ctx, "Using Remote summary model from knowledge base")
-					return kb.SummaryModelID, nil
-				}
-			}
-		}
-
-		// If no Remote model found, use first knowledge base's model
-		kb, err := s.knowledgeBaseService.GetKnowledgeBaseByID(ctx, knowledgeBaseIDs[0])
-		if err != nil {
-			logger.Errorf(ctx, "Failed to get knowledge base for model ID: %v", err)
-			return "", fmt.Errorf("failed to get knowledge base %s: %w", knowledgeBaseIDs[0], err)
-		}
-		if kb != nil && kb.SummaryModelID != "" {
-			logger.Infof(
-				ctx,
-				"Using summary model from first knowledge base %s: %s",
-				knowledgeBaseIDs[0],
-				kb.SummaryModelID,
-			)
-			return kb.SummaryModelID, nil
-		}
+		// SummaryModelID removed from KB - skip per-KB model lookup
+		// Fall through to system default model selection
 	}
 
 	// No knowledge bases - try to find any available chat model
@@ -411,19 +381,11 @@ func (s *sessionService) buildSearchTargets(
 		for _, kbID := range knowledgeBaseIDs {
 			fullKBSet[kbID] = true
 			kb := kbByID[kbID]
-			if kb == nil {
-				kbTenantMap[kbID] = tenantID
-			} else if kb.TenantID == tenantID {
-				kbTenantMap[kbID] = tenantID
-			} else if s.kbShareService != nil && userID != "" {
-				hasAccess, _ := s.kbShareService.HasKBPermission(ctx, kbID, userID, types.OrgRoleViewer)
-				if hasAccess {
-					kbTenantMap[kbID] = kb.TenantID
-				} else {
-					kbTenantMap[kbID] = tenantID
-				}
-			} else {
-				kbTenantMap[kbID] = tenantID
+			// TenantID removed from KB - always use current tenant
+			kbTenantMap[kbID] = tenantID
+			if kb != nil && s.kbShareService != nil && userID != "" {
+				// Still check permission for shared KBs
+				_, _ = s.kbShareService.HasKBPermission(ctx, kbID, userID, types.OrgRoleViewer)
 			}
 			targets = append(targets, &types.SearchTarget{
 				Type:            types.SearchTargetTypeKnowledgeBase,
@@ -435,7 +397,7 @@ func (s *sessionService) buildSearchTargets(
 
 	// Process individual knowledge IDs (include shared KB files the user has access to)
 	if len(knowledgeIDs) > 0 {
-		knowledgeList, err := s.knowledgeService.GetKnowledgeBatchWithSharedAccess(ctx, tenantID, knowledgeIDs)
+		knowledgeList, err := s.knowledgeService.GetKnowledgeBatchWithSharedAccess(ctx, knowledgeIDs)
 		if err != nil {
 			logger.Warnf(ctx, "Failed to get knowledge batch for search targets: %v", err)
 			return targets, nil // Return what we have, don't fail
@@ -448,9 +410,9 @@ func (s *sessionService) buildSearchTargets(
 			if k == nil || k.KnowledgeBaseID == "" {
 				continue
 			}
-			// Track KB -> TenantID mapping from knowledge items
+			// Track KB -> TenantID mapping from knowledge items (use current tenant)
 			if kbTenantMap[k.KnowledgeBaseID] == 0 {
-				kbTenantMap[k.KnowledgeBaseID] = k.TenantID
+				kbTenantMap[k.KnowledgeBaseID] = tenantID
 			}
 			// Skip if this KB is already fully searched
 			if fullKBSet[k.KnowledgeBaseID] {

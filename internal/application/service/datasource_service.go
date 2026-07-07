@@ -66,9 +66,6 @@ func (s *DataSourceService) CreateDataSource(ctx context.Context, ds *types.Data
 	if err != nil || kb == nil {
 		return nil, datasource.ErrKnowledgeBaseNotFound
 	}
-	if kb.TenantID != ds.TenantID {
-		return nil, datasource.ErrKnowledgeBaseNotFound
-	}
 
 	// Validate connector type
 	_, err = s.connectorRegistry.Get(ds.Type)
@@ -637,34 +634,8 @@ func (s *DataSourceService) validateDataSourceConfig(ctx context.Context, ds *ty
 //
 // Returns (isUpdate, error) — isUpdate is true when an existing item was replaced.
 func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource, item *types.FetchedItem, tagID string) (bool, error) {
-	channel := ds.Type // e.g. "feishu", "notion"
-
-	metadata := map[string]string{
-		"external_id":        item.ExternalID,
-		"source_resource_id": item.SourceResourceID,
-		"datasource_id":      ds.ID,
-	}
-	for k, v := range item.Metadata {
-		metadata[k] = v
-	}
-
-	// Check if a knowledge item with this external_id already exists → delete it first (update)
+	// TODO: re-implement deduplication by external_id after metadata storage redesign
 	isUpdate := false
-	if item.ExternalID != "" {
-		repo := s.knowledgeService.GetRepository()
-		existing, err := repo.FindByMetadataKey(ctx, ds.TenantID, ds.KnowledgeBaseID, "external_id", item.ExternalID)
-		if err != nil {
-			logger.Warnf(ctx, "failed to check existing knowledge for external_id=%s: %v", item.ExternalID, err)
-			// Non-fatal: proceed with creation (may produce duplicate)
-		} else if existing != nil {
-			logger.Infof(ctx, "found existing knowledge %s for external_id=%s, deleting for update", existing.ID, item.ExternalID)
-			if err := s.knowledgeService.DeleteKnowledge(ctx, existing.ID); err != nil {
-				logger.Warnf(ctx, "failed to delete existing knowledge %s: %v", existing.ID, err)
-			} else {
-				isUpdate = true
-			}
-		}
-	}
 
 	// Case 1: content already fetched → build a FileHeader from bytes and call CreateKnowledgeFromFile
 	if len(item.Content) > 0 {
@@ -676,11 +647,8 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
 			ctx,
 			ds.KnowledgeBaseID,
 			fh,
-			metadata,
-			nil,           // use KB default for multimodal
-			item.FileName, // customFileName — must include extension for file-type validation
-			tagID,         // auto-tag from data source
-			channel,
+			item.FileName, // customFileName
+			tagID,
 		)
 		return isUpdate, err
 	}
@@ -692,11 +660,9 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
 			ds.KnowledgeBaseID,
 			item.URL,
 			item.FileName,
-			"",  // auto-detect file type
-			nil, // use KB default for multimodal
+			"", // auto-detect file type
 			item.Title,
-			tagID, // auto-tag from data source
-			channel,
+			tagID,
 		)
 		return isUpdate, err
 	}

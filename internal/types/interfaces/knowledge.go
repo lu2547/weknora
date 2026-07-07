@@ -12,53 +12,43 @@ import (
 // KnowledgeService defines the interface for knowledge services.
 type KnowledgeService interface {
 	// CreateKnowledgeFromFile creates knowledge from a file.
-	// channel identifies the ingestion channel (e.g. "web", "api", "wechat"); empty defaults to "web".
 	CreateKnowledgeFromFile(
 		ctx context.Context,
 		kbID string,
 		file *multipart.FileHeader,
-		metadata map[string]string,
-		enableMultimodel *bool,
 		customFileName string,
 		tagID string,
-		channel string,
 	) (*types.Knowledge, error)
 	// CreateKnowledgeFromURL creates knowledge from a URL.
-	// When fileName or fileType is provided (or the URL path has a known file extension),
-	// the URL is treated as a direct file download instead of a web page crawl.
-	// channel identifies the ingestion channel; empty defaults to "web".
 	CreateKnowledgeFromURL(
 		ctx context.Context,
 		kbID string,
 		url string,
 		fileName string,
 		fileType string,
-		enableMultimodel *bool,
 		title string,
 		tagID string,
-		channel string,
 	) (*types.Knowledge, error)
 	// CreateKnowledgeFromPassage creates knowledge from text passages.
-	// channel identifies the ingestion channel; empty defaults to "web".
-	CreateKnowledgeFromPassage(ctx context.Context, kbID string, passage []string, channel string) (*types.Knowledge, error)
+	CreateKnowledgeFromPassage(ctx context.Context, kbID string, passage []string) (*types.Knowledge, error)
 	// CreateKnowledgeFromPassageSync creates knowledge from text passages and waits until chunks are indexed.
-	CreateKnowledgeFromPassageSync(ctx context.Context, kbID string, passage []string, channel string) (*types.Knowledge, error)
+	CreateKnowledgeFromPassageSync(ctx context.Context, kbID string, passage []string) (*types.Knowledge, error)
 	// CreateKnowledgeFromManual creates or saves manual Markdown knowledge content.
-	// channel identifies the ingestion channel; empty defaults to "web".
 	CreateKnowledgeFromManual(
 		ctx context.Context,
 		kbID string,
-		payload *types.ManualKnowledgePayload,
-		channel string,
+		title string,
+		content string,
+		tagID string,
 	) (*types.Knowledge, error)
 	// GetKnowledgeByID retrieves knowledge by ID (uses tenant from context).
 	GetKnowledgeByID(ctx context.Context, id string) (*types.Knowledge, error)
 	// GetKnowledgeByIDOnly retrieves knowledge by ID without tenant filter (for permission resolution).
 	GetKnowledgeByIDOnly(ctx context.Context, id string) (*types.Knowledge, error)
 	// GetKnowledgeBatch retrieves a batch of knowledge by IDs.
-	GetKnowledgeBatch(ctx context.Context, tenantID uint64, ids []string) ([]*types.Knowledge, error)
+	GetKnowledgeBatch(ctx context.Context, ids []string) ([]*types.Knowledge, error)
 	// GetKnowledgeBatchWithSharedAccess retrieves knowledge by IDs including items from shared KBs the user has access to.
-	GetKnowledgeBatchWithSharedAccess(ctx context.Context, tenantID uint64, ids []string) ([]*types.Knowledge, error)
+	GetKnowledgeBatchWithSharedAccess(ctx context.Context, ids []string) ([]*types.Knowledge, error)
 	// ListKnowledgeByKnowledgeBaseID lists all knowledge under a knowledge base.
 	ListKnowledgeByKnowledgeBaseID(ctx context.Context, kbID string) ([]*types.Knowledge, error)
 	// ListPagedKnowledgeByKnowledgeBaseID lists all knowledge under a knowledge base with pagination.
@@ -94,14 +84,14 @@ type KnowledgeService interface {
 	// UpdateImageInfo updates image information for a knowledge chunk.
 	UpdateImageInfo(ctx context.Context, knowledgeID string, chunkID string, imageInfo string) error
 	// ListFAQEntries lists FAQ entries under a FAQ knowledge base.
-	// When tagSeqID is non-zero, results are filtered by tag seq_id on FAQ chunks.
+	// When tagID is non-empty, results are filtered by tag ID on FAQ chunks.
 	// searchField: specifies which field to search in ("standard_question", "similar_questions", "answers", "" for all)
 	// sortOrder: "asc" for time ascending (updated_at ASC), default is time descending (updated_at DESC)
 	ListFAQEntries(
 		ctx context.Context,
 		kbID string,
 		page *types.Pagination,
-		tagSeqID int64,
+		tagID string,
 		keyword string,
 		searchField string,
 		sortOrder string,
@@ -132,8 +122,8 @@ type KnowledgeService interface {
 	// pass empty string to skip (caller must ensure authorization by other means).
 	UpdateKnowledgeTagBatch(ctx context.Context, authorizedKBID string, updates map[string]*string) error
 	// UpdateFAQEntryTagBatch updates tag for FAQ entries in batch.
-	// Key: entry seq_id, Value: tag seq_id (nil to remove tag)
-	UpdateFAQEntryTagBatch(ctx context.Context, kbID string, updates map[int64]*int64) error
+	// Key: entry seq_id, Value: tag UUID (nil to remove tag)
+	UpdateFAQEntryTagBatch(ctx context.Context, kbID string, updates map[int64]*string) error
 	// GetRepository gets the knowledge repository
 	GetRepository() KnowledgeRepository
 	// ProcessManualUpdate handles Asynq manual knowledge update tasks (cleanup + re-indexing)
@@ -164,59 +154,34 @@ type KnowledgeService interface {
 	GetFAQImportProgress(ctx context.Context, taskID string) (*types.FAQImportProgress, error)
 	// UpdateLastFAQImportResultDisplayStatus updates the display status of FAQ import result
 	UpdateLastFAQImportResultDisplayStatus(ctx context.Context, kbID string, displayStatus string) error
-	// SearchKnowledge searches knowledge items by keyword across the tenant.
-	// fileTypes: optional list of file extensions to filter by (e.g., ["csv", "xlsx"])
+	// SearchKnowledge searches knowledge items by keyword.
 	SearchKnowledge(ctx context.Context, keyword string, offset, limit int, fileTypes []string) ([]*types.Knowledge, bool, error)
-	// SearchKnowledgeForScopes searches knowledge within the given (tenant_id, kb_id) scopes (e.g. for shared agent context).
+	// SearchKnowledgeForScopes searches knowledge within the given kb_id scopes.
 	SearchKnowledgeForScopes(ctx context.Context, scopes []types.KnowledgeSearchScope, keyword string, offset, limit int, fileTypes []string) ([]*types.Knowledge, bool, error)
 }
 
 // KnowledgeRepository defines the interface for knowledge repositories.
 type KnowledgeRepository interface {
 	CreateKnowledge(ctx context.Context, knowledge *types.Knowledge) error
-	GetKnowledgeByID(ctx context.Context, tenantID uint64, id string) (*types.Knowledge, error)
-	// GetKnowledgeByIDOnly returns knowledge by ID without tenant filter (for permission resolution).
-	GetKnowledgeByIDOnly(ctx context.Context, id string) (*types.Knowledge, error)
-	ListKnowledgeByKnowledgeBaseID(ctx context.Context, tenantID uint64, kbID string) ([]*types.Knowledge, error)
-	// ListPagedKnowledgeByKnowledgeBaseID lists all knowledge in a knowledge base with pagination.
-	// When tagID is non-empty, results are filtered by tag_id.
-	// When keyword is non-empty, results are filtered by file_name.
-	// When fileType is non-empty, results are filtered by file_type or type.
+	GetKnowledgeByID(ctx context.Context, id string) (*types.Knowledge, error)
+	ListKnowledgeByKnowledgeBaseID(ctx context.Context, kbID string) ([]*types.Knowledge, error)
 	ListPagedKnowledgeByKnowledgeBaseID(ctx context.Context,
-		tenantID uint64, kbID string, page *types.Pagination, tagID string, keyword string, fileType string,
+		kbID string, page *types.Pagination, tagID string, keyword string, fileType string,
 	) ([]*types.Knowledge, int64, error)
 	UpdateKnowledge(ctx context.Context, knowledge *types.Knowledge) error
-	// UpdateKnowledgeBatch updates knowledge items in batch
 	UpdateKnowledgeBatch(ctx context.Context, knowledgeList []*types.Knowledge) error
-	DeleteKnowledge(ctx context.Context, tenantID uint64, id string) error
-	DeleteKnowledgeList(ctx context.Context, tenantID uint64, ids []string) error
-	GetKnowledgeBatch(ctx context.Context, tenantID uint64, ids []string) ([]*types.Knowledge, error)
-	// CheckKnowledgeExists checks if knowledge already exists.
-	// For file types, check by fileHash or (fileName+fileSize).
-	// For URL types, check by URL.
-	// Returns whether it exists, the existing knowledge object (if any), and possible error.
+	DeleteKnowledge(ctx context.Context, id string) error
+	DeleteKnowledgeList(ctx context.Context, ids []string) error
+	GetKnowledgeBatch(ctx context.Context, ids []string) ([]*types.Knowledge, error)
 	CheckKnowledgeExists(
 		ctx context.Context,
-		tenantID uint64,
 		kbID string,
 		params *types.KnowledgeCheckParams,
 	) (bool, *types.Knowledge, error)
-	// AminusB returns the difference set of A and B.
-	AminusB(ctx context.Context, Atenant uint64, A string, Btenant uint64, B string) ([]string, error)
 	UpdateKnowledgeColumn(ctx context.Context, id string, column string, value interface{}) error
-	// CountKnowledgeByKnowledgeBaseID counts the number of knowledge items in a knowledge base.
-	CountKnowledgeByKnowledgeBaseID(ctx context.Context, tenantID uint64, kbID string) (int64, error)
-	// CountKnowledgeByStatus counts the number of knowledge items with the specified parse status.
-	CountKnowledgeByStatus(ctx context.Context, tenantID uint64, kbID string, parseStatuses []string) (int64, error)
-	// SearchKnowledge searches knowledge items by keyword across the tenant.
-	// fileTypes: optional list of file extensions to filter by (e.g., ["csv", "xlsx"])
-	SearchKnowledge(ctx context.Context, tenantID uint64, keyword string, offset, limit int, fileTypes []string) ([]*types.Knowledge, bool, error)
-
-	// FindByMetadataKey finds a knowledge item by a key-value pair in the metadata JSON column.
-	// Used by data source sync to locate existing items by external_id.
-	FindByMetadataKey(ctx context.Context, tenantID uint64, kbID string, key string, value string) (*types.Knowledge, error)
-	// SearchKnowledgeInScopes searches knowledge items by keyword within the given (tenant_id, kb_id) scopes (own + shared).
+	CountKnowledgeByKnowledgeBaseID(ctx context.Context, kbID string) (int64, error)
+	CountKnowledgeByStatus(ctx context.Context, kbID string, parseStatuses []string) (int64, error)
+	SearchKnowledge(ctx context.Context, keyword string, offset, limit int, fileTypes []string) ([]*types.Knowledge, bool, error)
 	SearchKnowledgeInScopes(ctx context.Context, scopes []types.KnowledgeSearchScope, keyword string, offset, limit int, fileTypes []string) ([]*types.Knowledge, bool, error)
-	// ListIDsByTagID returns all knowledge IDs that have the specified tag ID.
-	ListIDsByTagID(ctx context.Context, tenantID uint64, kbID, tagID string) ([]string, error)
+	ListIDsByTagID(ctx context.Context, kbID, tagID string) ([]string, error)
 }

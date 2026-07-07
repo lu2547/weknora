@@ -170,10 +170,8 @@ func (e *EvaluationService) Evaluation(ctx context.Context,
 		}
 
 		kb, err := e.knowledgeBaseService.CreateKnowledgeBase(ctx, &types.KnowledgeBase{
-			Name:             "evaluation",
-			Description:      "evaluation",
-			EmbeddingModelID: embeddingModelID,
-			SummaryModelID:   llmModelID,
+			Name:        "evaluation",
+			Description: "evaluation",
 		})
 		if err != nil {
 			logger.Errorf(ctx, "Failed to create knowledge base: %v", err)
@@ -191,10 +189,8 @@ func (e *EvaluationService) Evaluation(ctx context.Context,
 		}
 
 		kb, err = e.knowledgeBaseService.CreateKnowledgeBase(ctx, &types.KnowledgeBase{
-			Name:             "evaluation",
-			Description:      "evaluation",
-			EmbeddingModelID: kb.EmbeddingModelID,
-			SummaryModelID:   kb.SummaryModelID,
+			Name:        "evaluation",
+			Description: "evaluation",
 		})
 		if err != nil {
 			logger.Errorf(ctx, "Failed to create knowledge base: %v", err)
@@ -353,7 +349,7 @@ func (e *EvaluationService) EvalDataset(ctx context.Context, detail *types.Evalu
 	logger.Infof(ctx, "Creating knowledge from %d passages", len(passages))
 
 	// Create knowledge base from passages
-	knowledge, err := e.knowledgeService.CreateKnowledgeFromPassage(ctx, knowledgeBaseID, passages, "")
+	knowledge, err := e.knowledgeService.CreateKnowledgeFromPassage(ctx, knowledgeBaseID, passages)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to create knowledge from passages: %v", err)
 		return err

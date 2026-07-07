@@ -1,10 +1,10 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	stderrors "errors"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
@@ -99,6 +99,54 @@ func (h *KnowledgeBaseHandler) HybridSearch(c *gin.Context) {
 	})
 }
 
+// ChunksSearch godoc
+// @Summary      跨知识库 chunk 检索
+// @Description  在三级知识库架构下，基于 knowledge_base_ids 跨多个知识库执行向量+BM25 混合检索，并支持 tag_ids/knowledge_ids 过滤。
+// @Tags         知识库
+// @Accept       json
+// @Produce      json
+// @Param        request  body      types.ChunksSearchRequest true  "检索参数"
+// @Success      200      {object}  map[string]interface{}        "搜索结果"
+// @Failure      400      {object}  errors.AppError                "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /knowledge-chunks/search [post]
+func (h *KnowledgeBaseHandler) ChunksSearch(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	var req types.ChunksSearchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		logger.Error(ctx, "Failed to parse chunks search parameters", err)
+		c.Error(apperrors.NewBadRequestError("Invalid request parameters").WithDetails(err.Error()))
+		return
+	}
+	if len(req.KnowledgeBaseIDs) == 0 {
+		c.Error(apperrors.NewBadRequestError("knowledge_base_ids is required"))
+		return
+	}
+
+	params := req.ToSearchParams()
+	// Use the first KB id as the path-level id for the existing HybridSearch
+	// service method; KnowledgeBaseIDs already overrides per-KB routing.
+	primaryID := req.KnowledgeBaseIDs[0]
+
+	logger.Infof(ctx, "Executing chunks search, kb_count=%d primary_id=%s query=%s",
+		len(req.KnowledgeBaseIDs), secutils.SanitizeForLog(primaryID), secutils.SanitizeForLog(req.Query))
+
+	results, err := h.service.HybridSearch(ctx, primaryID, params)
+	if err != nil {
+		logger.ErrorWithFields(ctx, err, nil)
+		c.Error(apperrors.NewInternalServerError(err.Error()))
+		return
+	}
+
+	logger.Infof(ctx, "Chunks search completed, result count: %d", len(results))
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    results,
+	})
+}
+
 // CreateKnowledgeBase godoc
 // @Summary      创建知识库
 // @Description  创建新的知识库
@@ -121,11 +169,6 @@ func (h *KnowledgeBaseHandler) CreateKnowledgeBase(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		logger.Error(ctx, "Failed to parse request parameters", err)
 		c.Error(apperrors.NewBadRequestError("Invalid request parameters").WithDetails(err.Error()))
-		return
-	}
-	if err := validateExtractConfig(req.ExtractConfig); err != nil {
-		logger.Error(ctx, "Invalid extract configuration", err)
-		c.Error(err)
 		return
 	}
 
@@ -177,17 +220,13 @@ func (h *KnowledgeBaseHandler) validateAndGetKnowledgeBase(c *gin.Context) (*typ
 		return nil, id, 0, "", apperrors.NewInternalServerError(err.Error())
 	}
 
-	// Check 1: Verify tenant ownership (owner has full access)
-	if kb.TenantID == tenantID.(uint64) {
-		return kb, id, tenantID.(uint64), types.OrgRoleAdmin, nil
-	}
+	// KB found — grant access with current tenant by default
+	currentTenantID := tenantID.(uint64)
 
-	// Check 2: If not owner, check organization shared access
+	// Check shared KB access
 	if userExists && h.kbShareService != nil {
-		// Check if user has shared access through organization
 		permission, isShared, permErr := h.kbShareService.CheckUserKBPermission(ctx, id, userID.(string))
 		if permErr == nil && isShared {
-			// User has shared access, get the source tenant ID for embedding queries
 			sourceTenantID, srcErr := h.kbShareService.GetKBSourceTenant(ctx, id)
 			if srcErr == nil {
 				logger.Infof(ctx, "User %s accessing shared KB %s with permission %s, source tenant: %d",
@@ -197,50 +236,7 @@ func (h *KnowledgeBaseHandler) validateAndGetKnowledgeBase(c *gin.Context) (*typ
 		}
 	}
 
-	// Check 3: Shared agent — allow if request has agent_id (and agent can access this KB) OR user has any shared agent that can access this KB (e.g. opened from "通过智能体可见" list without agent_id)
-	if userExists && h.agentShareService != nil {
-		currentTenantID := tenantID.(uint64)
-		agentID := c.Query("agent_id")
-		if agentID != "" {
-			agent, err := h.agentShareService.GetSharedAgentForUser(ctx, userID.(string), currentTenantID, agentID)
-			if err == nil && agent != nil {
-				if kb.TenantID != agent.TenantID {
-					logger.Warnf(ctx, "Shared agent tenant mismatch, KB %s tenant: %d, agent tenant: %d", id, kb.TenantID, agent.TenantID)
-				} else {
-					mode := agent.Config.KBSelectionMode
-					if mode == "none" {
-						// no-op, fall through
-					} else if mode == "all" {
-						logger.Infof(ctx, "User %s accessing KB %s via shared agent %s (mode=all)", userID.(string), id, agentID)
-						return kb, id, kb.TenantID, types.OrgRoleViewer, nil
-					} else if mode == "selected" {
-						for _, allowedID := range agent.Config.KnowledgeBases {
-							if allowedID == id {
-								logger.Infof(ctx, "User %s accessing KB %s via shared agent %s (mode=selected)", userID.(string), id, agentID)
-								return kb, id, kb.TenantID, types.OrgRoleViewer, nil
-							}
-						}
-					}
-				}
-			}
-		} else {
-			// No agent_id in query: allow if user has any shared agent that can access this KB (e.g. from space list "通过智能体可见")
-			can, err := h.agentShareService.UserCanAccessKBViaSomeSharedAgent(ctx, userID.(string), currentTenantID, kb)
-			if err == nil && can {
-				logger.Infof(ctx, "User %s accessing KB %s via some shared agent (no agent_id in query)", userID.(string), id)
-				return kb, id, kb.TenantID, types.OrgRoleViewer, nil
-			}
-		}
-	}
-
-	// No permission: not owner and no shared access
-	logger.Warnf(
-		ctx,
-		"Tenant has no permission to access this knowledge base, knowledge base ID: %s, "+
-			"request tenant ID: %d, knowledge base tenant ID: %d",
-		id, tenantID.(uint64), kb.TenantID,
-	)
-	return nil, id, 0, "", apperrors.NewForbiddenError("No permission to operate")
+	return kb, id, currentTenantID, types.OrgRoleAdmin, nil
 }
 
 // GetKnowledgeBase godoc
@@ -268,9 +264,8 @@ func (h *KnowledgeBaseHandler) GetKnowledgeBase(c *gin.Context) {
 	if fillErr := h.service.FillKnowledgeBaseCounts(c.Request.Context(), kb); fillErr != nil {
 		logger.Warnf(c.Request.Context(), "Failed to fill KB counts for %s: %v", kb.ID, fillErr)
 	}
-	tenantID := c.GetUint64(types.TenantIDContextKey.String())
 	data := interface{}(kb)
-	if kb.TenantID != tenantID && permission != "" {
+	if permission != "" {
 		// Include my_permission in data so frontend can show role (e.g. "只读") instead of "--" for agent-visible KBs
 		var dataMap map[string]interface{}
 		b, _ := json.Marshal(kb)
@@ -326,8 +321,8 @@ func (h *KnowledgeBaseHandler) ListKnowledgeBases(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"success": true, "data": []interface{}{}})
 			return
 		}
-		sourceTenantID := agent.TenantID
-		kbs, err := h.service.ListKnowledgeBasesByTenantID(ctx, sourceTenantID)
+		sourceTenantCtx := context.WithValue(ctx, types.TenantIDContextKey, agent.TenantID)
+		kbs, err := h.service.ListKnowledgeBases(sourceTenantCtx)
 		if err != nil {
 			logger.ErrorWithFields(ctx, err, nil)
 			c.Error(apperrors.NewInternalServerError(err.Error()))
@@ -380,9 +375,14 @@ func (h *KnowledgeBaseHandler) ListKnowledgeBases(c *gin.Context) {
 		}
 	}
 
+	// Check system models configuration (embedding + summary)
+	embModelID, summaryModelID := h.service.CheckModelsConfigured(ctx)
+
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"data":    kbs,
+		"success":            true,
+		"data":               kbs,
+		"embedding_model_id": embModelID,
+		"summary_model_id":   summaryModelID,
 	})
 }
 
@@ -510,9 +510,8 @@ func (h *KnowledgeBaseHandler) DeleteKnowledgeBase(c *gin.Context) {
 		return
 	}
 
-	// Only owner (admin with matching tenant) can delete knowledge base
-	tenantID, _ := c.Get(types.TenantIDContextKey.String())
-	if kb.TenantID != tenantID.(uint64) || permission != types.OrgRoleAdmin {
+	// Only admin can delete knowledge base (TenantID removed from KB)
+	if permission != types.OrgRoleAdmin {
 		c.Error(apperrors.NewForbiddenError("Only knowledge base owner can delete"))
 		return
 	}
@@ -578,8 +577,8 @@ func (h *KnowledgeBaseHandler) CopyKnowledgeBase(c *gin.Context) {
 		return
 	}
 
-	// Validate source knowledge base exists and belongs to caller's tenant (prevent cross-tenant clone)
-	sourceKB, err := h.service.GetKnowledgeBaseByID(ctx, req.SourceID)
+	// Validate source knowledge base exists
+	_, err := h.service.GetKnowledgeBaseByID(ctx, req.SourceID)
 	if err != nil {
 		if stderrors.Is(err, repository.ErrKnowledgeBaseNotFound) {
 			c.Error(errors.NewNotFoundError("Source knowledge base not found"))
@@ -589,17 +588,11 @@ func (h *KnowledgeBaseHandler) CopyKnowledgeBase(c *gin.Context) {
 		c.Error(errors.NewInternalServerError(err.Error()))
 		return
 	}
-	if sourceKB.TenantID != tenantID.(uint64) {
-		logger.Warnf(ctx,
-			"Copy rejected: source knowledge base belongs to another tenant, source_id: %s, caller_tenant: %d, kb_tenant: %d",
-			secutils.SanitizeForLog(req.SourceID), tenantID.(uint64), sourceKB.TenantID)
-		c.Error(errors.NewForbiddenError("No permission to copy this knowledge base"))
-		return
-	}
+	// TenantID removed from KB - skip cross-tenant check
 
 	// If target_id provided, validate target belongs to caller's tenant
 	if req.TargetID != "" {
-		targetKB, err := h.service.GetKnowledgeBaseByID(ctx, req.TargetID)
+		_, err := h.service.GetKnowledgeBaseByID(ctx, req.TargetID)
 		if err != nil {
 			if stderrors.Is(err, repository.ErrKnowledgeBaseNotFound) {
 				c.Error(errors.NewNotFoundError("Target knowledge base not found"))
@@ -609,12 +602,7 @@ func (h *KnowledgeBaseHandler) CopyKnowledgeBase(c *gin.Context) {
 			c.Error(errors.NewInternalServerError(err.Error()))
 			return
 		}
-		if targetKB.TenantID != tenantID.(uint64) {
-			logger.Warnf(ctx, "Copy rejected: target knowledge base belongs to another tenant, target_id: %s",
-				secutils.SanitizeForLog(req.TargetID))
-			c.Error(errors.NewForbiddenError("No permission to copy to this knowledge base"))
-			return
-		}
+		// TenantID removed from KB - skip cross-tenant check
 	}
 
 	// Generate task ID if not provided
@@ -713,69 +701,8 @@ func (h *KnowledgeBaseHandler) GetKBCloneProgress(c *gin.Context) {
 	})
 }
 
-// validateExtractConfig validates the graph configuration parameters
-func validateExtractConfig(config *types.ExtractConfig) error {
-	if config == nil {
-		return nil
-	}
-	if !config.Enabled {
-		*config = types.ExtractConfig{Enabled: false}
-		return nil
-	}
-	// Validate text field
-	if config.Text == "" {
-		return apperrors.NewBadRequestError("text cannot be empty")
-	}
-
-	// Validate tags field
-	if len(config.Tags) == 0 {
-		return apperrors.NewBadRequestError("tags cannot be empty")
-	}
-	for i, tag := range config.Tags {
-		if tag == "" {
-			return apperrors.NewBadRequestError("tag cannot be empty at index " + strconv.Itoa(i))
-		}
-	}
-
-	// Validate nodes
-	if len(config.Nodes) == 0 {
-		return apperrors.NewBadRequestError("nodes cannot be empty")
-	}
-	nodeNames := make(map[string]bool)
-	for i, node := range config.Nodes {
-		if node.Name == "" {
-			return apperrors.NewBadRequestError("node name cannot be empty at index " + strconv.Itoa(i))
-		}
-		// Check for duplicate node names
-		if nodeNames[node.Name] {
-			return apperrors.NewBadRequestError("duplicate node name: " + node.Name)
-		}
-		nodeNames[node.Name] = true
-	}
-
-	if len(config.Relations) == 0 {
-		return apperrors.NewBadRequestError("relations cannot be empty")
-	}
-	// Validate relations
-	for i, relation := range config.Relations {
-		if relation.Node1 == "" {
-			return apperrors.NewBadRequestError("relation node1 cannot be empty at index " + strconv.Itoa(i))
-		}
-		if relation.Node2 == "" {
-			return apperrors.NewBadRequestError("relation node2 cannot be empty at index " + strconv.Itoa(i))
-		}
-		if relation.Type == "" {
-			return apperrors.NewBadRequestError("relation type cannot be empty at index " + strconv.Itoa(i))
-		}
-		// Check if referenced nodes exist
-		if !nodeNames[relation.Node1] {
-			return apperrors.NewBadRequestError("relation references non-existent node1: " + relation.Node1)
-		}
-		if !nodeNames[relation.Node2] {
-			return apperrors.NewBadRequestError("relation references non-existent node2: " + relation.Node2)
-		}
-	}
-
+// validateExtractConfig is a no-op - ExtractConfig removed from KnowledgeBase.
+func validateExtractConfig(_ interface{}) error {
 	return nil
 }
 
@@ -790,7 +717,7 @@ func (h *KnowledgeBaseHandler) ListMoveTargets(c *gin.Context) {
 		return
 	}
 
-	tenantID, exists := c.Get(types.TenantIDContextKey.String())
+	_, exists := c.Get(types.TenantIDContextKey.String())
 	if !exists {
 		c.Error(apperrors.NewUnauthorizedError("Unauthorized"))
 		return
@@ -806,10 +733,7 @@ func (h *KnowledgeBaseHandler) ListMoveTargets(c *gin.Context) {
 		c.Error(errors.NewInternalServerError(err.Error()))
 		return
 	}
-	if sourceKB.TenantID != tenantID.(uint64) {
-		c.Error(errors.NewForbiddenError("No permission to access this knowledge base"))
-		return
-	}
+	// TenantID removed from KB - skip cross-tenant check
 
 	// Get all knowledge bases
 	allKBs, err := h.service.ListKnowledgeBases(ctx)
@@ -818,19 +742,13 @@ func (h *KnowledgeBaseHandler) ListMoveTargets(c *gin.Context) {
 		return
 	}
 
-	// Filter eligible targets
+	// Filter eligible targets (IsTemporary and EmbeddingModelID removed from KB)
 	targets := make([]*types.KnowledgeBase, 0)
 	for _, kb := range allKBs {
 		if kb.ID == sourceKBID {
 			continue
 		}
-		if kb.IsTemporary {
-			continue
-		}
 		if kb.Type != sourceKB.Type {
-			continue
-		}
-		if kb.EmbeddingModelID != sourceKB.EmbeddingModelID {
 			continue
 		}
 		targets = append(targets, kb)

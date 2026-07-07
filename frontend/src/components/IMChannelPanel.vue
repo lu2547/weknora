@@ -419,7 +419,8 @@ async function loadChannels() {
 }
 
 function getCallbackUrl(channel: IMChannel): string {
-  const base = import.meta.env.VITE_IS_DOCKER ? window.location.origin : 'http://127.0.0.1:8080';
+  // 回调URL始终使用当前页面origin，由 Vite 代理转发到后端（见 vite.config.ts）
+  const base = window.location.origin;
   return `${base}/api/v1/im/callback/${channel.id}`;
 }
 

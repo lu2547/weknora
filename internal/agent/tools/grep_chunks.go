@@ -11,6 +11,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/searchutil"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"gorm.io/gorm"
 )
 
@@ -92,18 +93,32 @@ type GrepChunksInput struct {
 
 // GrepChunksTool performs text pattern matching in knowledge base chunks
 // Similar to grep command in Unix-like systems, but operates on knowledge base content
+// When retrieveEngine is non-nil (Milvus), BM25 full-text search is used;
+// otherwise falls back to PostgreSQL LIKE queries.
 type GrepChunksTool struct {
 	BaseTool
-	db            *gorm.DB
-	searchTargets types.SearchTargets // Pre-computed unified search targets with KB-tenant mapping
+	db             *gorm.DB                    // fallback: PostgreSQL LIKE
+	retrieveEngine interfaces.RetrieveEngine   // primary: Milvus BM25 via Retrieve()
+	knowledgeSvc   interfaces.KnowledgeService // optional: used to back-fill KnowledgeTitle
+	searchTargets  types.SearchTargets         // Pre-computed unified search targets with KB-tenant mapping
 }
 
-// NewGrepChunksTool creates a new grep chunks tool
-func NewGrepChunksTool(db *gorm.DB, searchTargets types.SearchTargets) *GrepChunksTool {
+// NewGrepChunksTool creates a new grep chunks tool.
+// retrieveEngine should be the Milvus RetrieveEngine when available (it supports KeywordsRetrieverType);
+// pass nil to fall back to PostgreSQL LIKE search via db.
+// knowledgeSvc is optional; when provided it is used to resolve document titles for Milvus results.
+func NewGrepChunksTool(
+	db *gorm.DB,
+	retrieveEngine interfaces.RetrieveEngine,
+	knowledgeSvc interfaces.KnowledgeService,
+	searchTargets types.SearchTargets,
+) *GrepChunksTool {
 	return &GrepChunksTool{
-		BaseTool:      grepChunksTool,
-		db:            db,
-		searchTargets: searchTargets,
+		BaseTool:       grepChunksTool,
+		db:             db,
+		retrieveEngine: retrieveEngine,
+		knowledgeSvc:   knowledgeSvc,
+		searchTargets:  searchTargets,
 	}
 }
 
@@ -176,14 +191,23 @@ func (t *GrepChunksTool) Execute(ctx context.Context, args json.RawMessage) (*ty
 	logger.Infof(ctx, "[Tool][GrepChunks] Patterns: %v, MaxResults: %d, KBs: %v, KnowledgeIDs: %v, KBTenantMap: %v",
 		patterns, maxResults, kbIDs, allowedKnowledgeIDs, kbTenantMap)
 
-	// Build and execute query with tenant info
-	results, totalCount, err := t.searchChunks(ctx, patterns, kbIDs, allowedKnowledgeIDs, kbTenantMap)
-	if err != nil {
-		logger.Errorf(ctx, "[Tool][GrepChunks] Search failed: %v", err)
+	// Build and execute query: prefer Milvus BM25 when available, fall back to PG LIKE
+	var results []chunkWithTitle
+	var totalCount int64
+	var searchErr error
+	if t.retrieveEngine != nil {
+		logger.Infof(ctx, "[Tool][GrepChunks] >>> SEARCH BACKEND: Milvus BM25 (retrieveEngine=%T)", t.retrieveEngine)
+		results, totalCount, searchErr = t.searchChunksMilvus(ctx, patterns, kbIDs, allowedKnowledgeIDs, maxResults)
+	} else {
+		logger.Infof(ctx, "[Tool][GrepChunks] >>> SEARCH BACKEND: PostgreSQL LIKE (retrieveEngine=nil, fallback)")
+		results, totalCount, searchErr = t.searchChunks(ctx, patterns, kbIDs, allowedKnowledgeIDs, kbTenantMap)
+	}
+	if searchErr != nil {
+		logger.Errorf(ctx, "[Tool][GrepChunks] Search failed: %v", searchErr)
 		return &types.ToolResult{
 			Success: false,
-			Error:   fmt.Sprintf("Search failed: %v", err),
-		}, err
+			Error:   fmt.Sprintf("Search failed: %v", searchErr),
+		}, searchErr
 	}
 
 	logger.Infof(ctx, "[Tool][GrepChunks] Found %d matching chunks", len(results))
@@ -285,17 +309,17 @@ func (t *GrepChunksTool) searchChunks(
 		likeOp = "ILIKE"
 	}
 
-	query := t.db.Debug().WithContext(ctx).Table("chunks").
-		Select("chunks.id, chunks.content, chunks.chunk_index, chunks.knowledge_id, "+
-			"chunks.knowledge_base_id, chunks.chunk_type, chunks.created_at, "+
-			"knowledges.title as knowledge_title").
-		Joins("JOIN knowledges ON chunks.knowledge_id = knowledges.id").
-		Where("chunks.is_enabled = ?", true).
-		Where("chunks.deleted_at IS NULL").
-		Where("knowledges.deleted_at IS NULL")
+	query := t.db.Debug().WithContext(ctx).Table("chunk").
+		Select("chunk.id_chunk as id, chunk.content, chunk.chunk_index, chunk.id_knowledge as knowledge_id, "+
+			"chunk.id_knowledge_base as knowledge_base_id, chunk.chunk_type, chunk.created_at, "+
+			"knowledge.title as knowledge_title").
+		Joins("JOIN knowledge ON chunk.id_knowledge = knowledge.id_knowledge").
+		Where("chunk.is_enabled = ?", true).
+		Where("chunk.deleted_at IS NULL").
+		Where("knowledge.deleted_at IS NULL")
 
 	if len(knowledgeIDs) > 0 {
-		query = query.Where("chunks.knowledge_id IN ?", knowledgeIDs)
+		query = query.Where("chunk.id_knowledge IN ?", knowledgeIDs)
 		logger.Infof(ctx, "[Tool][GrepChunks] Filtering by %d specific knowledge IDs", len(knowledgeIDs))
 	} else if len(kbIDs) > 0 {
 		var conditions []string
@@ -303,7 +327,7 @@ func (t *GrepChunksTool) searchChunks(
 		for _, kbID := range kbIDs {
 			tenantID := kbTenantMap[kbID]
 			if tenantID > 0 {
-				conditions = append(conditions, "(chunks.knowledge_base_id = ? AND chunks.tenant_id = ?)")
+				conditions = append(conditions, "(chunk.id_knowledge_base = ? AND chunk.tenant_id = ?)")
 				args = append(args, kbID, tenantID)
 			}
 		}
@@ -316,12 +340,12 @@ func (t *GrepChunksTool) searchChunks(
 	}
 
 	if len(patterns) == 1 {
-		query = query.Where("chunks.content "+likeOp+" ?", "%"+patterns[0]+"%")
+		query = query.Where("chunk.content "+likeOp+" ?", "%"+patterns[0]+"%")
 	} else {
 		var conditions []string
 		var args []interface{}
 		for _, pattern := range patterns {
-			conditions = append(conditions, "chunks.content "+likeOp+" ?")
+			conditions = append(conditions, "chunk.content "+likeOp+" ?")
 			args = append(args, "%"+pattern+"%")
 		}
 		query = query.Where("("+strings.Join(conditions, " OR ")+")", args...)
@@ -330,7 +354,7 @@ func (t *GrepChunksTool) searchChunks(
 	const maxFetchLimit = 500
 
 	var results []chunkWithTitle
-	if err := query.Order("chunks.created_at DESC").Limit(maxFetchLimit).Find(&results).Error; err != nil {
+	if err := query.Order("chunk.created_at DESC").Limit(maxFetchLimit).Find(&results).Error; err != nil {
 		logger.Errorf(ctx, "[Tool][GrepChunks] Failed to fetch results: %v", err)
 		return nil, 0, err
 	}
@@ -371,6 +395,102 @@ func (t *GrepChunksTool) searchChunks(
 		}
 	}
 
+	return results, int64(len(results)), nil
+}
+
+// searchChunksMilvus performs BM25 full-text search via Milvus for each pattern.
+// Results from all patterns are merged and deduplicated. Knowledge titles are
+// resolved via knowledgeSvc when available.
+func (t *GrepChunksTool) searchChunksMilvus(
+	ctx context.Context,
+	patterns []string,
+	kbIDs []string,
+	allowedKnowledgeIDs []string,
+	maxResults int,
+) ([]chunkWithTitle, int64, error) {
+	if len(patterns) == 0 {
+		return nil, 0, nil
+	}
+
+	// Collect raw results from Milvus BM25 search — one call per pattern.
+	// Using pattern as the full-text query lets Milvus BM25 rank by term frequency.
+	logger.Infof(ctx, "[Tool][GrepChunks][Milvus] Starting BM25 search: patterns=%v kbIDs=%v knowledgeIDs=%v topK=%d",
+		patterns, kbIDs, allowedKnowledgeIDs, maxResults)
+
+	rawByChunkID := make(map[string]*types.IndexWithScore)
+	for _, pattern := range patterns {
+		if strings.TrimSpace(pattern) == "" {
+			continue
+		}
+		params := types.RetrieveParams{
+			Query:            pattern,
+			KnowledgeBaseIDs: kbIDs,
+			KnowledgeIDs:     allowedKnowledgeIDs,
+			TopK:             maxResults,
+			RetrieverType:    types.KeywordsRetrieverType,
+		}
+		retrieveResults, err := t.retrieveEngine.Retrieve(ctx, params)
+		if err != nil {
+			logger.Warnf(ctx, "[Tool][GrepChunks][Milvus] BM25 search failed for pattern %q: %v", pattern, err)
+			continue
+		}
+		hitCount := 0
+		for _, rr := range retrieveResults {
+			for _, hit := range rr.Results {
+				if hit == nil {
+					continue
+				}
+				hitCount++
+				// Keep the hit with highest score when the same chunk appears for multiple patterns.
+				if existing, ok := rawByChunkID[hit.ChunkID]; !ok || hit.Score > existing.Score {
+					rawByChunkID[hit.ChunkID] = hit
+				}
+			}
+		}
+		logger.Infof(ctx, "[Tool][GrepChunks][Milvus] pattern=%q => %d hits", pattern, hitCount)
+	}
+
+	if len(rawByChunkID) == 0 {
+		return nil, 0, nil
+	}
+
+	// Resolve knowledge titles in one batch when knowledgeSvc is available.
+	knowledgeTitleMap := make(map[string]string)
+	if t.knowledgeSvc != nil {
+		// Collect unique knowledge IDs.
+		knIDSet := make(map[string]struct{}, len(rawByChunkID))
+		for _, hit := range rawByChunkID {
+			if hit.KnowledgeID != "" {
+				knIDSet[hit.KnowledgeID] = struct{}{}
+			}
+		}
+		for knID := range knIDSet {
+			kn, err := t.knowledgeSvc.GetKnowledgeByIDOnly(ctx, knID)
+			if err == nil && kn != nil {
+				knowledgeTitleMap[knID] = kn.Title
+			}
+		}
+	}
+
+	// Build chunkWithTitle slice. TotalChunkCount is unknown here (no DB query);
+	// it will remain 0 and the aggregation layer handles it gracefully.
+	results := make([]chunkWithTitle, 0, len(rawByChunkID))
+	for _, hit := range rawByChunkID {
+		title := knowledgeTitleMap[hit.KnowledgeID]
+		results = append(results, chunkWithTitle{
+			Chunk: types.Chunk{
+				ID:              hit.ChunkID,
+				Content:         hit.Content,
+				KnowledgeID:     hit.KnowledgeID,
+				KnowledgeBaseID: hit.KnowledgeBaseID,
+			},
+			KnowledgeTitle: title,
+			MatchScore:     hit.Score,
+		})
+	}
+
+	logger.Infof(ctx, "[Tool][GrepChunks][Milvus] BM25 search returned %d unique chunks across %d patterns",
+		len(results), len(patterns))
 	return results, int64(len(results)), nil
 }
 

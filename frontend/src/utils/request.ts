@@ -6,7 +6,8 @@ import i18n from '@/i18n'
 const t = (key: string) => i18n.global.t(key)
 
 // API基础URL
-const BASE_URL = import.meta.env.VITE_IS_DOCKER ? "" : "http://localhost:8080";
+// 开发环境下使用相对路径，由 Vite 代理转发到后端（见 vite.config.ts）
+const BASE_URL = "";
 
 
 // 创建Axios实例
@@ -32,10 +33,10 @@ instance.interceptors.request.use(
     if (token) {
       config.headers["Authorization"] = `Bearer ${token}`;
     }
-    
+
     // 添加用户语言偏好
     config.headers["Accept-Language"] = getCurrentLanguage();
-    
+
     // 添加跨租户访问请求头（如果选择了其他租户）
     const selectedTenantId = localStorage.getItem('weknora_selected_tenant_id');
     const defaultTenantId = localStorage.getItem('weknora_tenant');
@@ -51,7 +52,7 @@ instance.interceptors.request.use(
         console.error('Failed to parse tenant info', e);
       }
     }
-    
+
     config.headers["X-Request-ID"] = `${generateRandomString(12)}`;
     return config;
   },
@@ -74,7 +75,7 @@ const processQueue = (error: any, token: string | null = null) => {
       resolve(token);
     }
   });
-  
+
   failedQueue = [];
 };
 
@@ -90,11 +91,11 @@ instance.interceptors.response.use(
   },
   async (error: any) => {
     const originalRequest = error.config;
-    
+
     if (!error.response) {
       return Promise.reject({ message: t('error.networkError') });
     }
-    
+
     // 如果是登录接口的401，直接返回错误以便页面展示toast，不做跳转
     if (error.response.status === 401 && originalRequest?.url?.includes('/auth/login')) {
       const { status, data } = error.response;
@@ -114,31 +115,31 @@ instance.interceptors.response.use(
           return Promise.reject(err);
         });
       }
-      
+
       originalRequest._retry = true;
       isRefreshing = true;
-      
+
       const refreshToken = localStorage.getItem('weknora_refresh_token');
-      
+
       if (refreshToken) {
         try {
           // 动态导入refresh token API
           const { refreshToken: refreshTokenAPI } = await import('../api/auth/index');
           const response = await refreshTokenAPI(refreshToken);
-          
+
           if (response.success && response.data) {
             const { token, refreshToken: newRefreshToken } = response.data;
-            
+
             // 更新localStorage中的token
             localStorage.setItem('weknora_token', token);
             localStorage.setItem('weknora_refresh_token', newRefreshToken);
-            
+
             // 更新请求头
             originalRequest.headers['Authorization'] = 'Bearer ' + token;
-            
+
             // 处理队列中的请求
             processQueue(null, token);
-            
+
             return instance(originalRequest);
           } else {
             throw new Error(response.message || t('error.tokenRefreshFailed'));
@@ -149,15 +150,15 @@ instance.interceptors.response.use(
           localStorage.removeItem('weknora_refresh_token');
           localStorage.removeItem('weknora_user');
           localStorage.removeItem('weknora_tenant');
-          
+
           processQueue(refreshError, null);
-          
+
           // 跳转到登录页
           if (!hasRedirectedOn401 && typeof window !== 'undefined') {
             hasRedirectedOn401 = true;
             window.location.href = '/login';
           }
-          
+
           return Promise.reject(refreshError);
         } finally {
           isRefreshing = false;
@@ -167,20 +168,20 @@ instance.interceptors.response.use(
         localStorage.removeItem('weknora_token');
         localStorage.removeItem('weknora_user');
         localStorage.removeItem('weknora_tenant');
-        
+
         if (!hasRedirectedOn401 && typeof window !== 'undefined') {
           hasRedirectedOn401 = true;
           window.location.href = '/login';
         }
-        
+
         return Promise.reject({ message: t('error.pleaseRelogin') });
       }
     }
-    
+
     // 处理 Nginx 413 Request Entity Too Large
     if (error.response.status === 413) {
-      return Promise.reject({ 
-        status: 413, 
+      return Promise.reject({
+        status: 413,
         message: t('error.fileSizeExceeded'),
         success: false
       });
@@ -202,10 +203,10 @@ instance.interceptors.response.use(
     } else if (typeof data === 'string') {
       errorMessage = data;
     }
-    return Promise.reject({ 
-      status, 
+    return Promise.reject({
+      status,
       message: errorMessage,
-      ...(typeof data === 'object' ? data : {}) 
+      ...(typeof data === 'object' ? data : {})
     });
   }
 );

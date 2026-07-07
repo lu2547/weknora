@@ -10,7 +10,6 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/agent/tools"
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
-	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -179,7 +178,7 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) error {
 	ctx = logger.WithField(ctx, "extract", p.ChunkID)
 	ctx = context.WithValue(ctx, types.TenantIDContextKey, p.TenantID)
 
-	chunk, err := s.chunkRepo.GetChunkByID(ctx, p.TenantID, p.ChunkID)
+	chunk, err := s.chunkRepo.GetChunkByID(ctx, p.ChunkID)
 	if err != nil {
 		logger.Errorf(ctx, "failed to get chunk: %v", err)
 		return err
@@ -189,50 +188,10 @@ func (s *ChunkExtractService) Handle(ctx context.Context, t *asynq.Task) error {
 		logger.Errorf(ctx, "failed to get knowledge base: %v", err)
 		return err
 	}
-	if kb.ExtractConfig == nil {
-		logger.Warnf(ctx, "failed to get extract config")
-		return err
-	}
 
-	chatModel, err := s.modelService.GetChatModel(ctx, p.ModelID)
-	if err != nil {
-		logger.Errorf(ctx, "failed to get chat model: %v", err)
-		return err
-	}
-
-	template := &types.PromptTemplateStructured{
-		Description: s.template.Description,
-		Tags:        kb.ExtractConfig.Tags,
-		Examples: []types.GraphData{
-			{
-				Text:     kb.ExtractConfig.Text,
-				Node:     kb.ExtractConfig.Nodes,
-				Relation: kb.ExtractConfig.Relations,
-			},
-		},
-	}
-	extractor := chatpipeline.NewExtractor(chatModel, template)
-	graph, err := extractor.Extract(ctx, chunk.Content)
-	if err != nil {
-		return err
-	}
-
-	chunk, err = s.chunkRepo.GetChunkByID(ctx, p.TenantID, p.ChunkID)
-	if err != nil {
-		logger.Warnf(ctx, "graph ignore chunk %s: %v", p.ChunkID, err)
-		return nil
-	}
-
-	for _, node := range graph.Node {
-		node.Chunks = []string{chunk.ID}
-	}
-	if err = s.graphEngine.AddGraph(ctx,
-		types.NameSpace{KnowledgeBase: chunk.KnowledgeBaseID, Knowledge: chunk.KnowledgeID},
-		[]*types.GraphData{graph},
-	); err != nil {
-		logger.Errorf(ctx, "failed to add graph: %v", err)
-		return err
-	}
+	// TODO: ExtractConfig removed from KnowledgeBase; need system-level or task-level config
+	_ = kb
+	logger.Warnf(ctx, "knowledge graph extraction skipped: ExtractConfig no longer on KnowledgeBase")
 	return nil
 }
 
@@ -305,7 +264,7 @@ func (s *DataTableSummaryService) Handle(ctx context.Context, t *asynq.Task) err
 	}
 
 	// 4. 索引到向量数据库
-	if err := s.indexToVectorDB(ctx, chunks, resources.retrieveEngine, resources.embeddingModel); err != nil {
+	if err := s.indexToVectorDB(ctx, resources.knowledge, chunks, resources.retrieveEngine, resources.embeddingModel); err != nil {
 		s.cleanupOnFailure(ctx, resources, chunks, err)
 		return err
 	}
@@ -475,7 +434,6 @@ func (s *DataTableSummaryService) buildChunks(resources *extractionResources, ta
 	// 表格摘要chunk
 	summaryChunk := &types.Chunk{
 		ID:              uuid.New().String(),
-		TenantID:        resources.knowledge.TenantID,
 		KnowledgeID:     resources.knowledge.ID,
 		KnowledgeBaseID: resources.knowledge.KnowledgeBaseID,
 		Content:         tableDescription,
@@ -489,7 +447,6 @@ func (s *DataTableSummaryService) buildChunks(resources *extractionResources, ta
 	// 列描述chunk（所有列的描述合并为一个chunk）
 	columnChunk := &types.Chunk{
 		ID:              uuid.New().String(),
-		TenantID:        resources.knowledge.TenantID,
 		KnowledgeID:     resources.knowledge.ID,
 		KnowledgeBaseID: resources.knowledge.KnowledgeBaseID,
 		Content:         columnDescription,
@@ -511,12 +468,18 @@ func (s *DataTableSummaryService) buildChunks(resources *extractionResources, ta
 // 思路：批量构建索引信息，统一索引，更新状态
 func (s *DataTableSummaryService) indexToVectorDB(
 	ctx context.Context,
+	knowledge *types.Knowledge,
 	chunks []*types.Chunk,
 	engine *retriever.CompositeRetrieveEngine,
 	embedder embedding.Embedder,
 ) error {
 	// 构建索引信息列表
 	indexInfoList := make([]*types.IndexInfo, 0, len(chunks))
+	var knowledgeFileName, knowledgeTagID string
+	if knowledge != nil {
+		knowledgeFileName = knowledge.FileName
+		knowledgeTagID = knowledge.TagID
+	}
 	for _, chunk := range chunks {
 		indexInfoList = append(indexInfoList, &types.IndexInfo{
 			Content:         chunk.Content,
@@ -525,6 +488,8 @@ func (s *DataTableSummaryService) indexToVectorDB(
 			ChunkID:         chunk.ID,
 			KnowledgeID:     chunk.KnowledgeID,
 			KnowledgeBaseID: chunk.KnowledgeBaseID,
+			TagIDs:          types.SingletonTagIDs(knowledgeTagID),
+			FileName:        knowledgeFileName,
 			IsEnabled:       true,
 		})
 	}
@@ -586,7 +551,7 @@ func (s *DataTableSummaryService) cleanupOnFailure(ctx context.Context, resource
 	// 删除对应的向量索引
 	if len(chunkIDs) > 0 {
 		if err := resources.retrieveEngine.DeleteBySourceIDList(
-			ctx, chunkIDs, resources.embeddingModel.GetDimensions(), types.KnowledgeBaseTypeDocument,
+			ctx, resources.knowledge.KnowledgeBaseID, chunkIDs, resources.embeddingModel.GetDimensions(), types.KnowledgeBaseTypeDocument,
 		); err != nil {
 			logger.Errorf(ctx, "Failed to delete vector index: %v", err)
 		} else {

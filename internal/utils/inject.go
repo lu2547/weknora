@@ -141,9 +141,9 @@ type sqlValidator struct {
 	enableHiddenKBFilter bool
 
 	// Search scope filtering (restrict to specific KBs and knowledges)
-	enableSearchScopeFilter  bool
-	searchScopeKBIDs         []string
-	searchScopeKnowledgeIDs  []string
+	enableSearchScopeFilter bool
+	searchScopeKBIDs        []string
+	searchScopeKnowledgeIDs []string
 }
 
 // ParseSQL parses a SQL statement using pg_query_go and extracts table names, select fields, and where fields
@@ -574,9 +574,9 @@ func WithTenantIsolation(tenantID uint64, tables ...string) SQLValidationOption 
 			// SECURITY: All tables with tenant_id column must be listed here
 			// to ensure proper tenant isolation and prevent cross-tenant data access
 			v.tablesWithTenantID = map[string]bool{
-				"knowledge_bases": true,
-				"knowledges":      true,
-				"chunks":          true,
+				"knowledge_base": true,
+				"knowledge":      true,
+				"chunk":          true,
 			}
 		} else {
 			for _, table := range tables {
@@ -594,9 +594,9 @@ func WithSoftDeleteFilter(tables ...string) SQLValidationOption {
 		if len(tables) == 0 {
 			// Default tables with soft-delete support.
 			v.tablesWithDeletedAt = map[string]bool{
-				"knowledge_bases": true,
-				"knowledges":      true,
-				"chunks":          true,
+				"knowledge_base": true,
+				"knowledge":      true,
+				"chunk":          true,
 			}
 		} else {
 			for _, table := range tables {
@@ -616,10 +616,10 @@ func WithHiddenKBFilter() SQLValidationOption {
 }
 
 // WithSearchScopeFilter restricts queries to the specified knowledge bases and
-// (optionally) specific knowledge documents. For the knowledge_bases table it
-// filters by id; for knowledges it filters by knowledge_base_id (and id when
-// knowledgeIDs is non-empty); for chunks it filters by knowledge_base_id (and
-// knowledge_id when knowledgeIDs is non-empty).
+// (optionally) specific knowledge documents. For the knowledge_base table it
+// filters by id_knowledge_base; for knowledge it filters by id_knowledge_base (and id_knowledge when
+// knowledgeIDs is non-empty); for chunk it filters by id_knowledge_base (and
+// id_knowledge when knowledgeIDs is non-empty).
 func WithSearchScopeFilter(kbIDs []string, knowledgeIDs []string) SQLValidationOption {
 	return func(v *sqlValidator) {
 		if len(kbIDs) > 0 {
@@ -650,9 +650,9 @@ func WithSecurityDefaults(tenantID uint64) SQLValidationOption {
 		// Tables without tenant_id (messages, embeddings) are excluded to prevent
 		// cross-tenant data access vulnerabilities (CVE: Broken Access Control)
 		WithAllowedTables(
-			"knowledge_bases",
-			"knowledges",
-			"chunks",
+			"knowledge_base",
+			"knowledge",
+			"chunk",
 		)(v)
 	}
 }
@@ -661,12 +661,12 @@ func WithSecurityDefaults(tenantID uint64) SQLValidationOption {
 func ValidateSQL(sql string, opts ...SQLValidationOption) (*SQLParseResult, *SQLValidationResult) {
 	// Initialize validator with defaults
 	validator := &sqlValidator{
-		allowedTables:      make(map[string]bool),
-		allowedFunctions:   make(map[string]bool),
-		tablesWithTenantID: make(map[string]bool),
+		allowedTables:       make(map[string]bool),
+		allowedFunctions:    make(map[string]bool),
+		tablesWithTenantID:  make(map[string]bool),
 		tablesWithDeletedAt: make(map[string]bool),
-		minLength:          6,
-		maxLength:          4096,
+		minLength:           6,
+		maxLength:           4096,
 	}
 
 	// Apply options
@@ -828,7 +828,7 @@ func ValidateAndSecureSQL(sql string, opts ...SQLValidationOption) (string, *SQL
 
 	// Find validator config to check if tenant injection is enabled
 	validator := &sqlValidator{
-		tablesWithTenantID: make(map[string]bool),
+		tablesWithTenantID:  make(map[string]bool),
 		tablesWithDeletedAt: make(map[string]bool),
 	}
 	for _, opt := range opts {
@@ -1018,23 +1018,23 @@ func (v *sqlValidator) injectSearchScopeConditions(sql string, tablesInQuery map
 
 	var conditions []string
 
-	if alias, ok := tablesInQuery["knowledge_bases"]; ok {
-		conditions = append(conditions, fmt.Sprintf("%s.id IN (%s)", alias, kbList))
+	if alias, ok := tablesInQuery["knowledge_base"]; ok {
+		conditions = append(conditions, fmt.Sprintf("%s.id_knowledge_base IN (%s)", alias, kbList))
 	}
 
-	if alias, ok := tablesInQuery["knowledges"]; ok {
-		conditions = append(conditions, fmt.Sprintf("%s.knowledge_base_id IN (%s)", alias, kbList))
+	if alias, ok := tablesInQuery["knowledge"]; ok {
+		conditions = append(conditions, fmt.Sprintf("%s.id_knowledge_base IN (%s)", alias, kbList))
 		if len(v.searchScopeKnowledgeIDs) > 0 {
 			quotedKIDs := quoteStringSlice(v.searchScopeKnowledgeIDs)
-			conditions = append(conditions, fmt.Sprintf("%s.id IN (%s)", alias, strings.Join(quotedKIDs, ", ")))
+			conditions = append(conditions, fmt.Sprintf("%s.id_knowledge IN (%s)", alias, strings.Join(quotedKIDs, ", ")))
 		}
 	}
 
-	if alias, ok := tablesInQuery["chunks"]; ok {
-		conditions = append(conditions, fmt.Sprintf("%s.knowledge_base_id IN (%s)", alias, kbList))
+	if alias, ok := tablesInQuery["chunk"]; ok {
+		conditions = append(conditions, fmt.Sprintf("%s.id_knowledge_base IN (%s)", alias, kbList))
 		if len(v.searchScopeKnowledgeIDs) > 0 {
 			quotedKIDs := quoteStringSlice(v.searchScopeKnowledgeIDs)
-			conditions = append(conditions, fmt.Sprintf("%s.knowledge_id IN (%s)", alias, strings.Join(quotedKIDs, ", ")))
+			conditions = append(conditions, fmt.Sprintf("%s.id_knowledge IN (%s)", alias, strings.Join(quotedKIDs, ", ")))
 		}
 	}
 
@@ -1860,13 +1860,13 @@ func (v *sqlValidator) validateFuncCall(fc *pg_query.FuncCall, result *SQLValida
 			"create_extension": true,
 
 			// Copy operations
-			"copy":        true,
-			"copy_to":     true,
-			"copy_from":   true,
-			"pg_copy_to":  true,
-			"pg_dump":     true,
-			"pg_dumpall":  true,
-			"pg_restore":  true,
+			"copy":          true,
+			"copy_to":       true,
+			"copy_from":     true,
+			"pg_copy_to":    true,
+			"pg_dump":       true,
+			"pg_dumpall":    true,
+			"pg_restore":    true,
 			"pg_basebackup": true,
 
 			// Process and system functions
@@ -1875,17 +1875,17 @@ func (v *sqlValidator) validateFuncCall(fc *pg_query.FuncCall, result *SQLValida
 			"pg_rotate_logfile":    true,
 
 			// Advisory locks (can be abused for DoS)
-			"pg_advisory_lock":           true,
-			"pg_advisory_unlock":         true,
-			"pg_advisory_lock_shared":    true,
-			"pg_advisory_unlock_shared":  true,
-			"pg_try_advisory_lock":       true,
+			"pg_advisory_lock":            true,
+			"pg_advisory_unlock":          true,
+			"pg_advisory_lock_shared":     true,
+			"pg_advisory_unlock_shared":   true,
+			"pg_try_advisory_lock":        true,
 			"pg_try_advisory_lock_shared": true,
 
 			// Backup and replication
-			"pg_start_backup":  true,
-			"pg_stop_backup":   true,
-			"pg_switch_wal":    true,
+			"pg_start_backup":         true,
+			"pg_stop_backup":          true,
+			"pg_switch_wal":           true,
 			"pg_create_restore_point": true,
 
 			// Foreign data wrappers
@@ -1893,12 +1893,12 @@ func (v *sqlValidator) validateFuncCall(fc *pg_query.FuncCall, result *SQLValida
 			"file_fdw_handler":     true,
 
 			// Procedural languages (code execution)
-			"plpgsql_call_handler": true,
+			"plpgsql_call_handler":  true,
 			"plpython_call_handler": true,
-			"plperl_call_handler": true,
+			"plperl_call_handler":   true,
 
 			// System catalog modification
-			"pg_catalog":  true,
+			"pg_catalog":         true,
 			"information_schema": true,
 		}
 		if dangerousFunctions[funcName] {

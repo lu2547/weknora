@@ -59,6 +59,7 @@ func (p *PluginSearch) runQueryExpansion(ctx context.Context, chatManage *types.
 					MatchCount:            expTopK,
 					DisableVectorMatch:    false,
 					DisableKeywordsMatch:  false,
+					TagIDs:                chatManage.TagIDs,
 					SkipContextEnrichment: true, // Pipeline handles context assembly in merge stage
 				}
 				// Apply knowledge ID filter if this is a partial KB search

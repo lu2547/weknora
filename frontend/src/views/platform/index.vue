@@ -35,7 +35,7 @@ const getCurrentKbId = (): string | null => {
     return (route.params as any)?.kbId as string || null
 }
 
-// 检查知识库初始化状态
+// 检查知识库是否存在（模型配置已改为系统级默认，不再逐 KB 校验）
 const checkKnowledgeBaseInitialization = async (): Promise<boolean> => {
     const currentKbId = getCurrentKbId();
     
@@ -46,9 +46,7 @@ const checkKnowledgeBaseInitialization = async (): Promise<boolean> => {
     
     try {
         const kbResponse = await getKnowledgeBaseById(currentKbId);
-        const kb = kbResponse.data;
-        
-        if (!kb.embedding_model_id || !kb.summary_model_id) {
+        if (!kbResponse.data) {
             MessagePlugin.warning(t('knowledgeBase.notInitialized'));
             return false;
         }

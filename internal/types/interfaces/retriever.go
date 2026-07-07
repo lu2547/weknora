@@ -31,9 +31,17 @@ type RetrieveEngineRepository interface {
 	EstimateStorageSize(ctx context.Context, indexInfoList []*types.IndexInfo, params map[string]any) int64
 
 	// DeleteByChunkIDList deletes the index info by chunk id list
-	DeleteByChunkIDList(ctx context.Context, indexIDList []string, dimension int, knowledgeType string) error
+	DeleteByChunkIDList(ctx context.Context, knowledgeBaseID string, indexIDList []string, dimension int, knowledgeType string) error
 	// DeleteBySourceIDList deletes the index info by source id list
-	DeleteBySourceIDList(ctx context.Context, sourceIDList []string, dimension int, knowledgeType string) error
+	DeleteBySourceIDList(ctx context.Context, knowledgeBaseID string, sourceIDList []string, dimension int, knowledgeType string) error
+	// DropKnowledgeBaseCollection drops the per-knowledge-base collection (used when deleting a KB)
+	DropKnowledgeBaseCollection(ctx context.Context, knowledgeBaseID string) error
+	// EnsureCollection eagerly provisions the collection that this KB will write into.
+	// Intended to be called right after CreateKnowledgeBase so users see the Milvus
+	// collection (personal/public/enterprise) appear immediately, instead of waiting
+	// for the first document upload to lazily create it.
+	// Backends without a collection concept (sqlite/pg/es) implement this as a no-op.
+	EnsureCollection(ctx context.Context, knowledgeBaseID string, dimension int) error
 	// 复制索引数据
 	// sourceKnowledgeBaseID: 源知识库ID
 	// sourceToTargetChunkIDMap: 源分块ID到目标分块ID的映射关系
@@ -50,15 +58,15 @@ type RetrieveEngineRepository interface {
 	) error
 
 	// DeleteByKnowledgeIDList deletes the index info by knowledge id list
-	DeleteByKnowledgeIDList(ctx context.Context, knowledgeIDList []string, dimension int, knowledgeType string) error
+	DeleteByKnowledgeIDList(ctx context.Context, knowledgeBaseID string, knowledgeIDList []string, dimension int, knowledgeType string) error
 
-	// BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch
+	// BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch within a single KB
 	// chunkStatusMap: map of chunk ID to enabled status (true = enabled, false = disabled)
-	BatchUpdateChunkEnabledStatus(ctx context.Context, chunkStatusMap map[string]bool) error
+	BatchUpdateChunkEnabledStatus(ctx context.Context, knowledgeBaseID string, chunkStatusMap map[string]bool) error
 
-	// BatchUpdateChunkTagID updates the tag ID of chunks in batch
-	// chunkTagMap: map of chunk ID to tag ID (empty string means no tag)
-	BatchUpdateChunkTagID(ctx context.Context, chunkTagMap map[string]string) error
+	// BatchUpdateChunkTagID updates the tag ID (and path) of chunks in batch within a single KB
+	// chunkTagMap: map of chunk ID -> target tag meta (ID+Path). Empty TagID/TagPath means clearing tag.
+	BatchUpdateChunkTagID(ctx context.Context, knowledgeBaseID string, chunkTagMap map[string]types.ChunkTagUpdate) error
 
 	// RetrieveEngine retrieves the engine
 	RetrieveEngine
@@ -111,21 +119,28 @@ type RetrieveEngineService interface {
 	) error
 
 	// DeleteByChunkIDList deletes the index info by chunk id list
-	DeleteByChunkIDList(ctx context.Context, indexIDList []string, dimension int, knowledgeType string) error
+	DeleteByChunkIDList(ctx context.Context, knowledgeBaseID string, indexIDList []string, dimension int, knowledgeType string) error
 
 	// DeleteBySourceIDList deletes the index info by source id list
-	DeleteBySourceIDList(ctx context.Context, sourceIDList []string, dimension int, knowledgeType string) error
+	DeleteBySourceIDList(ctx context.Context, knowledgeBaseID string, sourceIDList []string, dimension int, knowledgeType string) error
 
 	// DeleteByKnowledgeIDList deletes the index info by knowledge id list
-	DeleteByKnowledgeIDList(ctx context.Context, knowledgeIDList []string, dimension int, knowledgeType string) error
+	DeleteByKnowledgeIDList(ctx context.Context, knowledgeBaseID string, knowledgeIDList []string, dimension int, knowledgeType string) error
 
-	// BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch
+	// DropKnowledgeBaseCollection drops the per-knowledge-base collection (used when deleting a KB)
+	DropKnowledgeBaseCollection(ctx context.Context, knowledgeBaseID string) error
+
+	// EnsureCollection eagerly provisions the underlying collection for this KB.
+	// Service-layer counterpart of RetrieveEngineRepository.EnsureCollection.
+	EnsureCollection(ctx context.Context, knowledgeBaseID string, dimension int) error
+
+	// BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch within a single KB
 	// chunkStatusMap: map of chunk ID to enabled status (true = enabled, false = disabled)
-	BatchUpdateChunkEnabledStatus(ctx context.Context, chunkStatusMap map[string]bool) error
+	BatchUpdateChunkEnabledStatus(ctx context.Context, knowledgeBaseID string, chunkStatusMap map[string]bool) error
 
-	// BatchUpdateChunkTagID updates the tag ID of chunks in batch
-	// chunkTagMap: map of chunk ID to tag ID (empty string means no tag)
-	BatchUpdateChunkTagID(ctx context.Context, chunkTagMap map[string]string) error
+	// BatchUpdateChunkTagID updates the tag ID (and path) of chunks in batch within a single KB
+	// chunkTagMap: map of chunk ID -> target tag meta (ID+Path). Empty TagID/TagPath means clearing tag.
+	BatchUpdateChunkTagID(ctx context.Context, knowledgeBaseID string, chunkTagMap map[string]types.ChunkTagUpdate) error
 
 	// RetrieveEngine retrieves the engine
 	RetrieveEngine

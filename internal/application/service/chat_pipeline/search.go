@@ -15,15 +15,15 @@ import (
 
 // PluginSearch implements search functionality for chat pipeline
 type PluginSearch struct {
-	knowledgeBaseService      interfaces.KnowledgeBaseService
-	knowledgeService          interfaces.KnowledgeService
-	chunkService              interfaces.ChunkService
-	config                    *config.Config
-	webSearchService          interfaces.WebSearchService
-	tenantService             interfaces.TenantService
-	sessionService            interfaces.SessionService
-	webSearchStateService     interfaces.WebSearchStateService
-	webSearchProviderRepo     interfaces.WebSearchProviderRepository
+	knowledgeBaseService  interfaces.KnowledgeBaseService
+	knowledgeService      interfaces.KnowledgeService
+	chunkService          interfaces.ChunkService
+	config                *config.Config
+	webSearchService      interfaces.WebSearchService
+	tenantService         interfaces.TenantService
+	sessionService        interfaces.SessionService
+	webSearchStateService interfaces.WebSearchStateService
+	webSearchProviderRepo interfaces.WebSearchProviderRepository
 }
 
 func NewPluginSearch(eventManager *EventManager,
@@ -414,6 +414,7 @@ func (p *PluginSearch) searchByTargets(
 						VectorThreshold:       chatManage.VectorThreshold,
 						KeywordThreshold:      chatManage.KeywordThreshold,
 						MatchCount:            chatManage.EmbeddingTopK,
+						TagIDs:                chatManage.TagIDs,
 						SkipContextEnrichment: true,
 					}
 					res, err := p.knowledgeBaseService.HybridSearch(ctx, fullKBIDs[0], params)
@@ -501,6 +502,7 @@ func (p *PluginSearch) searchSingleTarget(
 		VectorThreshold:       chatManage.VectorThreshold,
 		KeywordThreshold:      chatManage.KeywordThreshold,
 		MatchCount:            chatManage.EmbeddingTopK,
+		TagIDs:                chatManage.TagIDs,
 		SkipContextEnrichment: true,
 	}
 	if t.Type == types.SearchTargetTypeKnowledge {
@@ -572,7 +574,7 @@ func (p *PluginSearch) tryDirectChunkLoading(ctx context.Context, tenantID uint6
 
 	knowledgeMap := make(map[string]*types.Knowledge)
 	if len(uniqueKIDs) > 0 {
-		knowledges, err := p.knowledgeService.GetKnowledgeBatchWithSharedAccess(ctx, tenantID, uniqueKIDs)
+		knowledges, err := p.knowledgeService.GetKnowledgeBatchWithSharedAccess(ctx, uniqueKIDs)
 		if err != nil {
 			logger.Warnf(ctx, "DirectLoad: Failed to fetch knowledge batch: %v", err)
 			// Continue without metadata
@@ -603,9 +605,9 @@ func (p *PluginSearch) tryDirectChunkLoading(ctx context.Context, tenantID uint6
 		if k, ok := knowledgeMap[chunk.KnowledgeID]; ok {
 			res.KnowledgeTitle = k.Title
 			res.KnowledgeFilename = k.FileName
-			res.KnowledgeSource = k.Source
-			res.KnowledgeChannel = k.Channel
-			res.Metadata = k.GetMetadata()
+			res.KnowledgeSource = k.Type
+			res.KnowledgeChannel = ""
+			res.Metadata = nil
 		}
 
 		results = append(results, res)

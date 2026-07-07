@@ -10,6 +10,7 @@ const t = (key: string) => i18n.global.t(key)
 export const toolIcons: Record<string, string> = {
     multi_kb_search: '🔍',
     knowledge_search: '📚',
+    select_documents: '📑',
     grep_chunks: '🔎',
     get_chunk_detail: '📄',
     list_knowledge_bases: '📂',
@@ -56,6 +57,7 @@ export function getMatchTypeIcon(matchType: string): string {
 const toolDisplayNameKeys: Record<string, string> = {
     multi_kb_search: 'tools.multiKbSearch',
     knowledge_search: 'tools.knowledgeSearch',
+    select_documents: 'tools.selectDocuments',
     grep_chunks: 'tools.grepChunks',
     get_chunk_detail: 'tools.getChunkDetail',
     list_knowledge_chunks: 'tools.listKnowledgeChunks',

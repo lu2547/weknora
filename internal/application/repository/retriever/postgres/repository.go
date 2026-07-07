@@ -108,7 +108,8 @@ func (g *pgRepository) BatchSave(
 }
 
 // DeleteByChunkIDList deletes indices by chunk IDs
-func (g *pgRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList []string, dimension int, knowledgeType string) error {
+func (g *pgRepository) DeleteByChunkIDList(ctx context.Context, knowledgeBaseID string, chunkIDList []string, dimension int, knowledgeType string) error {
+	_ = knowledgeBaseID
 	logger.GetLogger(ctx).Infof("[Postgres] Deleting indices by chunk IDs, count: %d", len(chunkIDList))
 	result := g.db.WithContext(ctx).Where("chunk_id IN ?", chunkIDList).Delete(&pgVector{})
 	if result.Error != nil {
@@ -120,7 +121,8 @@ func (g *pgRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList []st
 }
 
 // DeleteBySourceIDList deletes indices by source IDs
-func (g *pgRepository) DeleteBySourceIDList(ctx context.Context, sourceIDList []string, dimension int, knowledgeType string) error {
+func (g *pgRepository) DeleteBySourceIDList(ctx context.Context, knowledgeBaseID string, sourceIDList []string, dimension int, knowledgeType string) error {
+	_ = knowledgeBaseID
 	if len(sourceIDList) == 0 {
 		return nil
 	}
@@ -135,7 +137,8 @@ func (g *pgRepository) DeleteBySourceIDList(ctx context.Context, sourceIDList []
 }
 
 // DeleteByKnowledgeIDList deletes indices by knowledge IDs
-func (g *pgRepository) DeleteByKnowledgeIDList(ctx context.Context, knowledgeIDList []string, dimension int, knowledgeType string) error {
+func (g *pgRepository) DeleteByKnowledgeIDList(ctx context.Context, knowledgeBaseID string, knowledgeIDList []string, dimension int, knowledgeType string) error {
+	_ = knowledgeBaseID
 	logger.GetLogger(ctx).Infof("[Postgres] Deleting indices by knowledge IDs, count: %d", len(knowledgeIDList))
 	result := g.db.WithContext(ctx).Where("knowledge_id IN ?", knowledgeIDList).Delete(&pgVector{})
 	if result.Error != nil {
@@ -553,8 +556,24 @@ func (g *pgRepository) CopyIndices(ctx context.Context,
 	return nil
 }
 
+// DropKnowledgeBaseCollection is a no-op for postgres backend which uses a shared table
+// EnsureCollection is a no-op: postgres uses a single shared table, not per-KB collections.
+func (g *pgRepository) EnsureCollection(ctx context.Context, knowledgeBaseID string, dimension int) error {
+	_ = ctx
+	_ = knowledgeBaseID
+	_ = dimension
+	return nil
+}
+
+func (g *pgRepository) DropKnowledgeBaseCollection(ctx context.Context, knowledgeBaseID string) error {
+	_ = ctx
+	_ = knowledgeBaseID
+	return nil
+}
+
 // BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch
-func (g *pgRepository) BatchUpdateChunkEnabledStatus(ctx context.Context, chunkStatusMap map[string]bool) error {
+func (g *pgRepository) BatchUpdateChunkEnabledStatus(ctx context.Context, knowledgeBaseID string, chunkStatusMap map[string]bool) error {
+	_ = knowledgeBaseID
 	if len(chunkStatusMap) == 0 {
 		logger.GetLogger(ctx).Warnf("[Postgres] Chunk status map is empty, skipping update")
 		return nil
@@ -605,7 +624,8 @@ func (g *pgRepository) BatchUpdateChunkEnabledStatus(ctx context.Context, chunkS
 }
 
 // BatchUpdateChunkTagID updates the tag ID of chunks in batch
-func (g *pgRepository) BatchUpdateChunkTagID(ctx context.Context, chunkTagMap map[string]string) error {
+func (g *pgRepository) BatchUpdateChunkTagID(ctx context.Context, knowledgeBaseID string, chunkTagMap map[string]types.ChunkTagUpdate) error {
+	_ = knowledgeBaseID
 	if len(chunkTagMap) == 0 {
 		logger.GetLogger(ctx).Warnf("[Postgres] Chunk tag map is empty, skipping update")
 		return nil
@@ -613,9 +633,10 @@ func (g *pgRepository) BatchUpdateChunkTagID(ctx context.Context, chunkTagMap ma
 
 	logger.GetLogger(ctx).Infof("[Postgres] Batch updating chunk tag ID, count: %d", len(chunkTagMap))
 
-	// Group chunks by tag ID for batch updates
+	// Group chunks by leaf tag ID for batch updates
 	tagGroups := make(map[string][]string)
-	for chunkID, tagID := range chunkTagMap {
+	for chunkID, upd := range chunkTagMap {
+		tagID := types.LeafTagID(upd.TagIDs)
 		tagGroups[tagID] = append(tagGroups[tagID], chunkID)
 	}
 

@@ -122,9 +122,6 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 		}, fmt.Errorf("knowledge base not in search targets")
 	}
 
-	// Use the knowledge's actual tenant_id for chunk query (supports cross-tenant shared KB)
-	effectiveTenantID := knowledge.TenantID
-
 	chunkLimit := 20
 	if input.Limit > 0 {
 		chunkLimit = input.Limit
@@ -143,7 +140,7 @@ func (t *ListKnowledgeChunksTool) Execute(ctx context.Context, args json.RawMess
 	}
 
 	chunks, total, err := t.chunkService.GetRepository().ListPagedChunksByKnowledgeID(ctx,
-		effectiveTenantID, knowledgeID, pagination, []types.ChunkType{types.ChunkTypeText, types.ChunkTypeFAQ}, "", "", "", "", "")
+		knowledgeID, pagination, []types.ChunkType{types.ChunkTypeText, types.ChunkTypeFAQ}, "", "", "", "", "")
 	if err != nil {
 		return &types.ToolResult{
 			Success: false,

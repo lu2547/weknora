@@ -48,6 +48,11 @@ const (
 
 	// operatorBetween is the "between" operator.
 	operatorBetween = "between"
+
+	// operatorArrayContainsAny 对 Array 字段调用 Milvus 表达式
+	// ARRAY_CONTAINS_ANY(field, [..]) 。注意 Milvus 2.6 只支持立即字面量列表，
+	// 不能走 template params，所以我们直接序列化为双引号字符串拼入。
+	operatorArrayContainsAny = "array_contains_any"
 )
 
 var comparisonOperators = map[string]string{
@@ -152,6 +157,8 @@ func (c *filter) convertCondition(
 		return c.convertInCondition(cond, counter)
 	case operatorBetween:
 		return c.convertBetweenCondition(cond, counter)
+	case operatorArrayContainsAny:
+		return c.convertArrayContainsAnyCondition(cond)
 	default:
 		return nil, fmt.Errorf("unsupported operator: %v", cond.Operator)
 	}
@@ -175,6 +182,31 @@ func (c *filter) convertInCondition(
 	return &convertResult{
 		exprStr: fmt.Sprintf("%s %s {%s}", condField, strings.ToLower(cond.Operator), paramName),
 		params:  map[string]any{paramName: cond.Value},
+	}, nil
+}
+
+// convertArrayContainsAnyCondition 生成 ARRAY_CONTAINS_ANY(field, ["a","b",...]) 表达式。
+// Milvus 2.6 不支持用 template params 传递列表给 ARRAY_CONTAINS_ANY，需要字面量拼接。
+func (c *filter) convertArrayContainsAnyCondition(
+	cond *universalFilterCondition,
+) (*convertResult, error) {
+	condField := cond.Field
+	if condField == "" || cond.Value == nil {
+		return nil, fmt.Errorf("milvus filter condition is nil")
+	}
+
+	v := reflect.ValueOf(cond.Value)
+	if v.Kind() != reflect.Slice || v.Len() <= 0 {
+		return nil, fmt.Errorf("array_contains_any value must be a non-empty slice: %v", cond.Value)
+	}
+
+	items := make([]string, 0, v.Len())
+	for i := 0; i < v.Len(); i++ {
+		items = append(items, formatValue(v.Index(i).Interface()))
+	}
+	return &convertResult{
+		exprStr: fmt.Sprintf("ARRAY_CONTAINS_ANY(%s, [%s])", condField, strings.Join(items, ", ")),
+		params:  map[string]any{},
 	}, nil
 }
 

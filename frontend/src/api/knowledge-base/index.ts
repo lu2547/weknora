@@ -8,9 +8,9 @@ export function listKnowledgeBases(params?: { agent_id?: string }) {
   return get(qs ? `/api/v1/knowledge-bases?${qs}` : '/api/v1/knowledge-bases');
 }
 
-export function createKnowledgeBase(data: { 
-  name: string; 
-  description?: string; 
+export function createKnowledgeBase(data: {
+  name: string;
+  description?: string;
   type?: 'document' | 'faq';
   chunking_config?: any;
   embedding_model_id?: string;
@@ -40,7 +40,7 @@ export function getKnowledgeBaseById(id: string, options?: { agent_id?: string }
 }
 
 export function updateKnowledgeBase(id: string, data: { name: string; description?: string; config: any }) {
-  return put(`/api/v1/knowledge-bases/${id}` , data);
+  return put(`/api/v1/knowledge-bases/${id}`, data);
 }
 
 export function deleteKnowledgeBase(id: string) {
@@ -77,7 +77,7 @@ export function togglePinKnowledgeBase(id: string) {
 
 // 知识文件 API（基于具体知识库）
 // data.tag_id: 可选，指定知识所属的分类ID
-export function uploadKnowledgeFile(kbId: string, data: { file: File; tag_id?: string; [key: string]: any } = { file: new File([], '') }, onProgress?: (progressEvent: any) => void) {
+export function uploadKnowledgeFile(kbId: string, data: { file: File; tag_id?: string;[key: string]: any } = { file: new File([], '') }, onProgress?: (progressEvent: any) => void) {
   const formData = new FormData();
   Object.keys(data).forEach(key => {
     if (data[key] !== undefined) formData.append(key, data[key]);
@@ -174,9 +174,15 @@ export function listKnowledgeTags(
   return get(`/api/v1/knowledge-bases/${kbId}/tags${query}`);
 }
 
+// Returns hierarchical tag tree with per-node usage statistics.
+// Backend endpoint: GET /knowledge-bases/:id/tag-tree
+export function listKnowledgeTagTree(kbId: string) {
+  return get(`/api/v1/knowledge-bases/${kbId}/tag-tree`);
+}
+
 export function createKnowledgeBaseTag(
   kbId: string,
-  data: { name: string; color?: string; sort_order?: number },
+  data: { name: string; parent_id?: string; color?: string; sort_order?: number },
 ) {
   return post(`/api/v1/knowledge-bases/${kbId}/tags`, data);
 }
@@ -187,6 +193,16 @@ export function updateKnowledgeBaseTag(
   data: { name?: string; color?: string; sort_order?: number },
 ) {
   return put(`/api/v1/knowledge-bases/${kbId}/tags/${tagId}`, data);
+}
+
+// Move a tag under a new parent. Empty string `new_parent_id` moves the tag to root.
+// Backend endpoint: POST /knowledge-bases/:id/tags/:tag_id/move
+export function moveKnowledgeBaseTag(
+  kbId: string,
+  tagId: string,
+  data: { new_parent_id: string },
+) {
+  return post(`/api/v1/knowledge-bases/${kbId}/tags/${tagId}/move`, data);
 }
 
 export function deleteKnowledgeBaseTag(kbId: string, tagSeqId: number, params?: { force?: boolean }) {

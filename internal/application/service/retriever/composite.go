@@ -102,26 +102,52 @@ func (c *CompositeRetrieveEngine) SupportRetriever(r types.RetrieverType) bool {
 	return false
 }
 
-// BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch
+// BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch within a KB
 func (c *CompositeRetrieveEngine) BatchUpdateChunkEnabledStatus(
 	ctx context.Context,
+	knowledgeBaseID string,
 	chunkStatusMap map[string]bool,
 ) error {
 	return c.concurrentExecWithError(ctx, func(ctx context.Context, engineInfo *engineInfo) error {
-		if err := engineInfo.retrieveEngine.BatchUpdateChunkEnabledStatus(ctx, chunkStatusMap); err != nil {
+		if err := engineInfo.retrieveEngine.BatchUpdateChunkEnabledStatus(ctx, knowledgeBaseID, chunkStatusMap); err != nil {
 			return err
 		}
 		return nil
 	})
 }
 
-// BatchUpdateChunkTagID updates the tag ID of chunks in batch
+// BatchUpdateChunkTagID updates the tag ID (and path) of chunks in batch within a KB
 func (c *CompositeRetrieveEngine) BatchUpdateChunkTagID(
 	ctx context.Context,
-	chunkTagMap map[string]string,
+	knowledgeBaseID string,
+	chunkTagMap map[string]types.ChunkTagUpdate,
 ) error {
 	return c.concurrentExecWithError(ctx, func(ctx context.Context, engineInfo *engineInfo) error {
-		if err := engineInfo.retrieveEngine.BatchUpdateChunkTagID(ctx, chunkTagMap); err != nil {
+		if err := engineInfo.retrieveEngine.BatchUpdateChunkTagID(ctx, knowledgeBaseID, chunkTagMap); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+// DropKnowledgeBaseCollection drops per-KB collections on all registered engines
+func (c *CompositeRetrieveEngine) DropKnowledgeBaseCollection(ctx context.Context, knowledgeBaseID string) error {
+	return c.concurrentExecWithError(ctx, func(ctx context.Context, engineInfo *engineInfo) error {
+		if err := engineInfo.retrieveEngine.DropKnowledgeBaseCollection(ctx, knowledgeBaseID); err != nil {
+			logger.Errorf(ctx, "Repository %s failed to drop KB collection: %v", engineInfo.retrieveEngine.EngineType(), err)
+			return err
+		}
+		return nil
+	})
+}
+
+// EnsureCollection eagerly provisions per-KB collections on all registered engines.
+// On milvus this materializes the personal/public/enterprise Milvus collection right
+// after KB creation; other engines (qdrant/weaviate/sqlite/pg/es) treat it as a no-op.
+func (c *CompositeRetrieveEngine) EnsureCollection(ctx context.Context, knowledgeBaseID string, dimension int) error {
+	return c.concurrentExecWithError(ctx, func(ctx context.Context, engineInfo *engineInfo) error {
+		if err := engineInfo.retrieveEngine.EnsureCollection(ctx, knowledgeBaseID, dimension); err != nil {
+			logger.Errorf(ctx, "Repository %s failed to ensure KB collection: %v", engineInfo.retrieveEngine.EngineType(), err)
 			return err
 		}
 		return nil
@@ -245,12 +271,12 @@ func (c *CompositeRetrieveEngine) BatchIndex(ctx context.Context,
 	return err
 }
 
-// DeleteByChunkIDList deletes vector embeddings by chunk ID list from all registered repositories
+// DeleteByChunkIDList deletes vector embeddings by chunk ID list within a KB
 func (c *CompositeRetrieveEngine) DeleteByChunkIDList(ctx context.Context,
-	chunkIDList []string, dimension int, knowledgeType string,
+	knowledgeBaseID string, chunkIDList []string, dimension int, knowledgeType string,
 ) error {
 	return c.concurrentExecWithError(ctx, func(ctx context.Context, engineInfo *engineInfo) error {
-		if err := engineInfo.retrieveEngine.DeleteByChunkIDList(ctx, chunkIDList, dimension, knowledgeType); err != nil {
+		if err := engineInfo.retrieveEngine.DeleteByChunkIDList(ctx, knowledgeBaseID, chunkIDList, dimension, knowledgeType); err != nil {
 			logger.GetLogger(ctx).Errorf("Repository %s failed to delete chunk ID list: %v",
 				engineInfo.retrieveEngine.EngineType(), err)
 			return err
@@ -259,12 +285,12 @@ func (c *CompositeRetrieveEngine) DeleteByChunkIDList(ctx context.Context,
 	})
 }
 
-// DeleteBySourceIDList deletes vector embeddings by source ID list from all registered repositories
+// DeleteBySourceIDList deletes vector embeddings by source ID list within a KB
 func (c *CompositeRetrieveEngine) DeleteBySourceIDList(ctx context.Context,
-	sourceIDList []string, dimension int, knowledgeType string,
+	knowledgeBaseID string, sourceIDList []string, dimension int, knowledgeType string,
 ) error {
 	return c.concurrentExecWithError(ctx, func(ctx context.Context, engineInfo *engineInfo) error {
-		if err := engineInfo.retrieveEngine.DeleteBySourceIDList(ctx, sourceIDList, dimension, knowledgeType); err != nil {
+		if err := engineInfo.retrieveEngine.DeleteBySourceIDList(ctx, knowledgeBaseID, sourceIDList, dimension, knowledgeType); err != nil {
 			logger.GetLogger(ctx).Errorf("Repository %s failed to delete source ID list: %v",
 				engineInfo.retrieveEngine.EngineType(), err)
 			return err
@@ -300,12 +326,12 @@ func (c *CompositeRetrieveEngine) CopyIndices(
 	})
 }
 
-// DeleteByKnowledgeIDList deletes vector embeddings by knowledge ID list from all registered repositories
+// DeleteByKnowledgeIDList deletes vector embeddings by knowledge ID list within a KB
 func (c *CompositeRetrieveEngine) DeleteByKnowledgeIDList(ctx context.Context,
-	knowledgeIDList []string, dimension int, knowledgeType string,
+	knowledgeBaseID string, knowledgeIDList []string, dimension int, knowledgeType string,
 ) error {
 	return c.concurrentExecWithError(ctx, func(ctx context.Context, engineInfo *engineInfo) error {
-		if err := engineInfo.retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeIDList, dimension, knowledgeType); err != nil {
+		if err := engineInfo.retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeBaseID, knowledgeIDList, dimension, knowledgeType); err != nil {
 			logger.GetLogger(ctx).Errorf("Repository %s failed to delete knowledge ID list: %v",
 				engineInfo.retrieveEngine.EngineType(), err)
 			return err

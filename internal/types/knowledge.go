@@ -2,7 +2,6 @@ package types
 
 import (
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,20 +13,6 @@ const (
 	KnowledgeTypeManual = "manual"
 	// KnowledgeTypeFAQ represents the FAQ knowledge type
 	KnowledgeTypeFAQ = "faq"
-)
-
-// Channel constants identify through which channel a knowledge entry was ingested.
-// Aligned with Message.Channel values ("web", "api", "im") but allows finer granularity.
-const (
-	ChannelWeb              = "web"               // Web UI (default)
-	ChannelAPI              = "api"               // External API call
-	ChannelBrowserExtension = "browser_extension" // Browser extension / plugin
-	ChannelWechat           = "wechat"            // WeChat
-	ChannelWecom            = "wecom"             // WeCom (企业微信)
-	ChannelFeishu           = "feishu"            // Feishu / Lark
-	ChannelDingtalk         = "dingtalk"          // DingTalk
-	ChannelSlack            = "slack"             // Slack
-	ChannelIM               = "im"                // Generic IM channel
 )
 
 // Knowledge parse status constants
@@ -65,16 +50,30 @@ const (
 	ManualKnowledgeStatusPublish  = "publish"
 )
 
+// EnableStatus constants — DDL semantics: '0' = enabled, '1' = disabled (inverted from common convention)
+const (
+	EnableStatusEnabled  = "0" // 0 = 启用
+	EnableStatusDisabled = "1" // 1 = 禁用
+)
+
+// Channel constants identify the ingestion source (used by IM/datasource modules).
+const (
+	ChannelWechat   = "wechat"
+	ChannelWecom    = "wecom"
+	ChannelFeishu   = "feishu"
+	ChannelDingtalk = "dingtalk"
+	ChannelSlack    = "slack"
+	ChannelIM       = "im"
+)
+
 // Knowledge represents a knowledge entity in the system.
 // It contains metadata about the knowledge source, its processing status,
 // and references to the physical file if applicable.
 type Knowledge struct {
-	// Unique identifier of the knowledge
-	ID string `json:"id"                 gorm:"type:varchar(36);primaryKey"`
-	// Tenant ID
-	TenantID uint64 `json:"tenant_id"`
-	// ID of the knowledge base
-	KnowledgeBaseID string `json:"knowledge_base_id"`
+	// Unique identifier of the knowledge (PK column: id_knowledge)
+	ID string `json:"id"                 gorm:"column:id_knowledge;type:varchar(36);primaryKey"`
+	// ID of the knowledge base (FK column: id_knowledge_base)
+	KnowledgeBaseID string `json:"knowledge_base_id"  gorm:"column:id_knowledge_base"`
 	// Optional tag ID for categorization within a knowledge base
 	TagID string `json:"tag_id"             gorm:"type:varchar(36);index"`
 	// Type of the knowledge
@@ -83,17 +82,13 @@ type Knowledge struct {
 	Title string `json:"title"`
 	// Description of the knowledge
 	Description string `json:"description"`
-	// Source of the knowledge (e.g. URL address for url type, "manual" for manual type)
-	Source string `json:"source"`
-	// Channel indicates through which channel the knowledge was ingested (web, api, browser_extension, wechat, etc.)
-	Channel string `json:"channel"            gorm:"type:varchar(50);default:'web'"`
 	// Parse status of the knowledge
 	ParseStatus string `json:"parse_status"`
 	// Summary status for async summary generation
 	SummaryStatus string `json:"summary_status"     gorm:"type:varchar(32);default:none"`
-	// Enable status of the knowledge
-	EnableStatus string `json:"enable_status"`
-	// ID of the embedding model
+	// Enable status of the knowledge (DDL: '0'=enabled, '1'=disabled)
+	EnableStatus string `json:"enable_status"      gorm:"type:char(1);default:'0'"`
+	// ID of the embedding model (historical snapshot of which model was used)
 	EmbeddingModelID string `json:"embedding_model_id"`
 	// File name of the knowledge
 	FileName string `json:"file_name"`
@@ -107,10 +102,8 @@ type Knowledge struct {
 	FilePath string `json:"file_path"`
 	// Storage size of the knowledge
 	StorageSize int64 `json:"storage_size"`
-	// Metadata of the knowledge
-	Metadata JSON `json:"metadata"           gorm:"type:json"`
-	// Last FAQ import result (for FAQ type knowledge only)
-	LastFAQImportResult JSON `json:"last_faq_import_result" gorm:"type:json"`
+	// Milvus collection name (pre-computed, avoids runtime resolution)
+	CollectionName string `json:"collection_name"    gorm:"type:varchar(128)"`
 	// Creation time of the knowledge
 	CreatedAt time.Time `json:"created_at"`
 	// Last updated time of the knowledge
@@ -121,24 +114,111 @@ type Knowledge struct {
 	ErrorMessage string `json:"error_message"`
 	// Deletion time of the knowledge
 	DeletedAt gorm.DeletedAt `json:"deleted_at"         gorm:"index"`
-	// Knowledge base name (not stored in database, populated on query)
-	KnowledgeBaseName string `json:"knowledge_base_name" gorm:"-"`
+	// Metadata stores JSON metadata (used by manual knowledge for content storage)
+	Metadata JSON `json:"metadata,omitempty"  gorm:"type:jsonb"`
 }
 
-// GetMetadata returns the metadata as a map[string]string.
-func (k *Knowledge) GetMetadata() map[string]string {
-	metadata := make(map[string]string)
-	if len(k.Metadata) == 0 {
-		return metadata
+// TableName overrides GORM's default plural table name.
+func (Knowledge) TableName() string {
+	return "knowledge"
+}
+
+// IsEnabled returns the semantic boolean for enable_status (0=enabled→true, 1=disabled→false).
+func (k *Knowledge) IsEnabled() bool {
+	return k != nil && k.EnableStatus != EnableStatusDisabled
+}
+
+// IsManual returns true if this is a manual knowledge entry.
+func (k *Knowledge) IsManual() bool {
+	return k != nil && k.Type == KnowledgeTypeManual
+}
+
+// ManualKnowledgeMetadata represents the metadata structure for manual knowledge.
+type ManualKnowledgeMetadata struct {
+	Content string `json:"content"`
+	Status  string `json:"status"`
+	Version int    `json:"version"`
+}
+
+// NewManualKnowledgeMetadata creates a new ManualKnowledgeMetadata.
+func NewManualKnowledgeMetadata(content, status string, version int) *ManualKnowledgeMetadata {
+	return &ManualKnowledgeMetadata{
+		Content: content,
+		Status:  status,
+		Version: version,
 	}
-	metadataMap, err := k.Metadata.Map()
-	if err != nil {
+}
+
+// ManualMetadata decodes the Metadata JSON into ManualKnowledgeMetadata.
+func (k *Knowledge) ManualMetadata() (*ManualKnowledgeMetadata, error) {
+	if k == nil || len(k.Metadata) == 0 {
+		return nil, nil
+	}
+	var m ManualKnowledgeMetadata
+	if err := json.Unmarshal(k.Metadata, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// SetManualMetadata encodes ManualKnowledgeMetadata into the Metadata JSON field.
+func (k *Knowledge) SetManualMetadata(m *ManualKnowledgeMetadata) error {
+	if m == nil {
+		k.Metadata = nil
 		return nil
 	}
-	for k, v := range metadataMap {
-		metadata[k] = fmt.Sprintf("%v", v)
+	data, err := json.Marshal(m)
+	if err != nil {
+		return err
 	}
-	return metadata
+	k.Metadata = JSON(data)
+	return nil
+}
+
+// EnsureManualDefaults sets default values for manual knowledge entries.
+func (k *Knowledge) EnsureManualDefaults() {
+	if k == nil {
+		return
+	}
+	if k.FileType == "" {
+		k.FileType = KnowledgeTypeManual
+	}
+}
+
+// SetLastFAQImportResult stores the FAQ import result in the Knowledge Metadata field.
+func (k *Knowledge) SetLastFAQImportResult(result *FAQImportResult) error {
+	if result == nil {
+		k.Metadata = nil
+		return nil
+	}
+	// Wrap under a key so Metadata can hold other data too
+	wrapper := map[string]interface{}{"last_faq_import_result": result}
+	data, err := json.Marshal(wrapper)
+	if err != nil {
+		return err
+	}
+	k.Metadata = JSON(data)
+	return nil
+}
+
+// GetLastFAQImportResult reads the FAQ import result from the Knowledge Metadata field.
+func (k *Knowledge) GetLastFAQImportResult() (*FAQImportResult, error) {
+	if k == nil || len(k.Metadata) == 0 {
+		return nil, nil
+	}
+	var wrapper map[string]json.RawMessage
+	if err := json.Unmarshal(k.Metadata, &wrapper); err != nil {
+		return nil, err
+	}
+	raw, ok := wrapper["last_faq_import_result"]
+	if !ok || len(raw) == 0 {
+		return nil, nil
+	}
+	var result FAQImportResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 // BeforeCreate hook generates a UUID for new Knowledge entities before they are created.
@@ -149,153 +229,17 @@ func (k *Knowledge) BeforeCreate(tx *gorm.DB) (err error) {
 	return nil
 }
 
-// ManualKnowledgeMetadata stores metadata for manual Markdown knowledge content.
-type ManualKnowledgeMetadata struct {
-	Content   string `json:"content"`
-	Format    string `json:"format"`
-	Status    string `json:"status"`
-	Version   int    `json:"version"`
-	UpdatedAt string `json:"updated_at"`
+// KnowledgeSearchScope defines a knowledge_base_id scope for knowledge search.
+type KnowledgeSearchScope struct {
+	KBID string
 }
 
-// ManualKnowledgePayload represents the payload for manual knowledge operations.
+// ManualKnowledgePayload is the request body for creating/updating manual knowledge.
 type ManualKnowledgePayload struct {
 	Title   string `json:"title"`
 	Content string `json:"content"`
 	Status  string `json:"status"`
 	TagID   string `json:"tag_id"`
-	Channel string `json:"channel"`
-}
-
-// KnowledgeSearchScope defines a (tenant_id, knowledge_base_id) scope for knowledge search (e.g. own KBs + shared KBs).
-type KnowledgeSearchScope struct {
-	TenantID uint64
-	KBID     string
-}
-
-// NewManualKnowledgeMetadata creates a new ManualKnowledgeMetadata instance.
-func NewManualKnowledgeMetadata(content, status string, version int) *ManualKnowledgeMetadata {
-	if version <= 0 {
-		version = 1
-	}
-	return &ManualKnowledgeMetadata{
-		Content:   content,
-		Format:    ManualKnowledgeFormatMarkdown,
-		Status:    status,
-		Version:   version,
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
-	}
-}
-
-// ToJSON converts the metadata to JSON type.
-func (m *ManualKnowledgeMetadata) ToJSON() (JSON, error) {
-	if m == nil {
-		return nil, nil
-	}
-	if m.Format == "" {
-		m.Format = ManualKnowledgeFormatMarkdown
-	}
-	if m.Status == "" {
-		m.Status = ManualKnowledgeStatusDraft
-	}
-	if m.Version <= 0 {
-		m.Version = 1
-	}
-	if m.UpdatedAt == "" {
-		m.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	}
-	bytes, err := json.Marshal(m)
-	if err != nil {
-		return nil, err
-	}
-	return JSON(bytes), nil
-}
-
-// ManualMetadata parses and returns manual knowledge metadata.
-func (k *Knowledge) ManualMetadata() (*ManualKnowledgeMetadata, error) {
-	if len(k.Metadata) == 0 {
-		return nil, nil
-	}
-	var metadata ManualKnowledgeMetadata
-	if err := json.Unmarshal(k.Metadata, &metadata); err != nil {
-		return nil, err
-	}
-	if metadata.Format == "" {
-		metadata.Format = ManualKnowledgeFormatMarkdown
-	}
-	if metadata.Version <= 0 {
-		metadata.Version = 1
-	}
-	return &metadata, nil
-}
-
-// SetManualMetadata sets manual knowledge metadata onto the knowledge instance.
-func (k *Knowledge) SetManualMetadata(meta *ManualKnowledgeMetadata) error {
-	if meta == nil {
-		k.Metadata = nil
-		return nil
-	}
-	jsonValue, err := meta.ToJSON()
-	if err != nil {
-		return err
-	}
-	k.Metadata = jsonValue
-	return nil
-}
-
-// SetLastFAQImportResult sets FAQ import result to the dedicated field.
-func (k *Knowledge) SetLastFAQImportResult(result *FAQImportResult) error {
-	if result == nil {
-		k.LastFAQImportResult = nil
-		return nil
-	}
-	jsonValue, err := result.ToJSON()
-	if err != nil {
-		return err
-	}
-	k.LastFAQImportResult = jsonValue
-	return nil
-}
-
-// GetLastFAQImportResult parses and returns FAQ import result from the dedicated field.
-func (k *Knowledge) GetLastFAQImportResult() (*FAQImportResult, error) {
-	if len(k.LastFAQImportResult) == 0 {
-		return nil, nil
-	}
-	var result FAQImportResult
-	if err := json.Unmarshal(k.LastFAQImportResult, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
-// IsManual returns true if the knowledge item is manual Markdown knowledge.
-func (k *Knowledge) IsManual() bool {
-	return k != nil && k.Type == KnowledgeTypeManual
-}
-
-// EnsureManualDefaults sets default values for manual knowledge entries.
-func (k *Knowledge) EnsureManualDefaults() {
-	if k == nil {
-		return
-	}
-	if k.Type == "" {
-		k.Type = KnowledgeTypeManual
-	}
-	if k.FileType == "" {
-		k.FileType = KnowledgeTypeManual
-	}
-	if k.Source == "" {
-		k.Source = KnowledgeTypeManual
-	}
-	if k.Channel == "" {
-		k.Channel = ChannelWeb
-	}
-}
-
-// IsDraft returns whether the payload should be saved as draft.
-func (p ManualKnowledgePayload) IsDraft() bool {
-	return p.Status == "" || p.Status == ManualKnowledgeStatusDraft
 }
 
 // KnowledgeCheckParams defines parameters used to check if knowledge already exists.

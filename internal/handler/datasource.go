@@ -50,10 +50,6 @@ func (h *DataSourceHandler) getOwnedKnowledgeBase(
 		return nil, http.StatusNotFound, "knowledge base not found"
 	}
 
-	if kb.TenantID != tenantID {
-		return nil, http.StatusForbidden, "access denied"
-	}
-
 	return kb, http.StatusOK, ""
 }
 

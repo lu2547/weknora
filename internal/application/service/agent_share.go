@@ -413,9 +413,7 @@ func (s *agentShareService) UserCanAccessKBViaSomeSharedAgent(ctx context.Contex
 			continue
 		}
 		agent := info.Agent
-		if agent.TenantID != kb.TenantID {
-			continue
-		}
+		// TenantID check removed - KB no longer has TenantID
 		mode := agent.Config.KBSelectionMode
 		if mode == "none" {
 			continue

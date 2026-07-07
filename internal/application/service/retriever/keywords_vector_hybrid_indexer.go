@@ -205,25 +205,36 @@ func (v *KeywordsVectorHybridRetrieveEngineService) boundedConcurrentBatchSaveNo
 	return g.Wait()
 }
 
-// DeleteByChunkIDList deletes vectors by their chunk IDs
+// DeleteByChunkIDList deletes vectors by their chunk IDs within a KB collection
 func (v *KeywordsVectorHybridRetrieveEngineService) DeleteByChunkIDList(ctx context.Context,
-	indexIDList []string, dimension int, knowledgeType string,
+	knowledgeBaseID string, indexIDList []string, dimension int, knowledgeType string,
 ) error {
-	return v.indexRepository.DeleteByChunkIDList(ctx, indexIDList, dimension, knowledgeType)
+	return v.indexRepository.DeleteByChunkIDList(ctx, knowledgeBaseID, indexIDList, dimension, knowledgeType)
 }
 
-// DeleteBySourceIDList deletes vectors by their source IDs
+// DeleteBySourceIDList deletes vectors by their source IDs within a KB collection
 func (v *KeywordsVectorHybridRetrieveEngineService) DeleteBySourceIDList(ctx context.Context,
-	sourceIDList []string, dimension int, knowledgeType string,
+	knowledgeBaseID string, sourceIDList []string, dimension int, knowledgeType string,
 ) error {
-	return v.indexRepository.DeleteBySourceIDList(ctx, sourceIDList, dimension, knowledgeType)
+	return v.indexRepository.DeleteBySourceIDList(ctx, knowledgeBaseID, sourceIDList, dimension, knowledgeType)
 }
 
-// DeleteByKnowledgeIDList deletes vectors by their knowledge IDs
+// DeleteByKnowledgeIDList deletes vectors by their knowledge IDs within a KB collection
 func (v *KeywordsVectorHybridRetrieveEngineService) DeleteByKnowledgeIDList(ctx context.Context,
-	knowledgeIDList []string, dimension int, knowledgeType string,
+	knowledgeBaseID string, knowledgeIDList []string, dimension int, knowledgeType string,
 ) error {
-	return v.indexRepository.DeleteByKnowledgeIDList(ctx, knowledgeIDList, dimension, knowledgeType)
+	return v.indexRepository.DeleteByKnowledgeIDList(ctx, knowledgeBaseID, knowledgeIDList, dimension, knowledgeType)
+}
+
+// DropKnowledgeBaseCollection drops the per-KB collection backing this engine
+func (v *KeywordsVectorHybridRetrieveEngineService) DropKnowledgeBaseCollection(ctx context.Context, knowledgeBaseID string) error {
+	return v.indexRepository.DropKnowledgeBaseCollection(ctx, knowledgeBaseID)
+}
+
+// EnsureCollection delegates to the underlying repository to eagerly provision
+// the per-KB collection (real implementation only on milvus; others no-op).
+func (v *KeywordsVectorHybridRetrieveEngineService) EnsureCollection(ctx context.Context, knowledgeBaseID string, dimension int) error {
+	return v.indexRepository.EnsureCollection(ctx, knowledgeBaseID, dimension)
 }
 
 // Support returns the retriever types supported by this engine
@@ -268,18 +279,20 @@ func (v *KeywordsVectorHybridRetrieveEngineService) CopyIndices(
 	)
 }
 
-// BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch
+// BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch within a KB
 func (v *KeywordsVectorHybridRetrieveEngineService) BatchUpdateChunkEnabledStatus(
 	ctx context.Context,
+	knowledgeBaseID string,
 	chunkStatusMap map[string]bool,
 ) error {
-	return v.indexRepository.BatchUpdateChunkEnabledStatus(ctx, chunkStatusMap)
+	return v.indexRepository.BatchUpdateChunkEnabledStatus(ctx, knowledgeBaseID, chunkStatusMap)
 }
 
-// BatchUpdateChunkTagID updates the tag ID of chunks in batch
+// BatchUpdateChunkTagID updates the tag ID (and path) of chunks in batch within a KB
 func (v *KeywordsVectorHybridRetrieveEngineService) BatchUpdateChunkTagID(
 	ctx context.Context,
-	chunkTagMap map[string]string,
+	knowledgeBaseID string,
+	chunkTagMap map[string]types.ChunkTagUpdate,
 ) error {
-	return v.indexRepository.BatchUpdateChunkTagID(ctx, chunkTagMap)
+	return v.indexRepository.BatchUpdateChunkTagID(ctx, knowledgeBaseID, chunkTagMap)
 }

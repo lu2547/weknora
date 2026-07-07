@@ -1227,6 +1227,7 @@ import {
   searchFAQEntries,
   exportFAQEntries,
   listKnowledgeTags,
+  listKnowledgeTagTree,
   updateFAQEntryTagBatch,
   createKnowledgeBaseTag,
   updateKnowledgeBaseTag,
@@ -1431,7 +1432,12 @@ const tagDropdownOptions = computed(() =>
   regularTags.value.map((tag: any) => ({ content: tag.name, value: String(tag.seq_id) })),
 )
 const tagSelectOptions = computed(() =>
-  regularTags.value.map((tag: any) => ({ label: tag.name, value: tag.seq_id })),
+  regularTags.value.map((tag: any) => {
+    const depth = Number(tag.depth || 0)
+    // Render hierarchy visually in a flat <t-select> dropdown.
+    const indent = depth > 0 ? '— '.repeat(depth) : ''
+    return { label: indent + tag.name, value: tag.seq_id }
+  }),
 )
 const sidebarCategoryCount = computed(() => tagList.value.length)
 const filteredTags = computed(() => {
@@ -1588,6 +1594,8 @@ const loadTags = async (reset = false) => {
     return
   }
 
+  // Pagination is retained for template compatibility but tree endpoint
+  // returns the entire tag tree in a single call.
   if (reset) {
     tagPage.value = 1
     tagList.value = []
@@ -1595,36 +1603,34 @@ const loadTags = async (reset = false) => {
     tagHasMore.value = false
   }
 
-  const currentPage = tagPage.value || 1
-  tagLoading.value = currentPage === 1
-  tagLoadingMore.value = currentPage > 1
+  tagLoading.value = true
+  tagLoadingMore.value = false
 
   try {
-    const res: any = await listKnowledgeTags(props.kbId, {
-      page: currentPage,
-      page_size: TAG_PAGE_SIZE,
-      keyword: tagSearchQuery.value || undefined,
-    })
-    const pageData = (res?.data || {}) as {
-      data?: any[]
-      total?: number
+    const res: any = await listKnowledgeTagTree(props.kbId)
+    const rawTree = (res?.data || []) as any[]
+    // Flatten the tree depth-first so that parents precede their children,
+    // preserving the hierarchy ordering used by <t-select> dropdowns.
+    const flat: any[] = []
+    const walk = (nodes: any[], depth: number) => {
+      for (const n of nodes) {
+        flat.push({ ...n, id: String(n.id), depth })
+        if (Array.isArray(n.children) && n.children.length) {
+          walk(n.children, depth + 1)
+        }
+      }
     }
-    const pageTags = (pageData.data || []).map((tag: any) => ({
-      ...tag,
-      id: String(tag.id),
-    }))
+    walk(rawTree, 0)
 
-    if (currentPage === 1) {
-      tagList.value = pageTags
-    } else {
-      tagList.value = [...tagList.value, ...pageTags]
-    }
+    // Optional local keyword filter mirrors the previous keyword query.
+    const keyword = (tagSearchQuery.value || '').trim().toLowerCase()
+    const filtered = keyword
+      ? flat.filter((tag) => (tag.name || '').toLowerCase().includes(keyword))
+      : flat
 
-    tagTotal.value = pageData.total || tagList.value.length
-    tagHasMore.value = tagList.value.length < tagTotal.value
-    if (tagHasMore.value) {
-      tagPage.value = currentPage + 1
-    }
+    tagList.value = filtered
+    tagTotal.value = filtered.length
+    tagHasMore.value = false
   } catch (error: any) {
     MessagePlugin.error(error?.message || t('common.operationFailed'))
   } finally {

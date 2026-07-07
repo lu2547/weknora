@@ -9,13 +9,11 @@ import (
 
 // fetchKnowledgeData gets knowledge data in batch.
 func (s *knowledgeBaseService) fetchKnowledgeData(ctx context.Context,
-	tenantID uint64,
 	knowledgeIDs []string,
 ) (map[string]*types.Knowledge, error) {
-	knowledges, err := s.kgRepo.GetKnowledgeBatch(ctx, tenantID, knowledgeIDs)
+	knowledges, err := s.kgRepo.GetKnowledgeBatch(ctx, knowledgeIDs)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
-			"tenant_id":     tenantID,
 			"knowledge_ids": knowledgeIDs,
 		})
 		return nil, err
@@ -32,10 +30,9 @@ func (s *knowledgeBaseService) fetchKnowledgeData(ctx context.Context,
 // fetchKnowledgeDataWithShared gets knowledge data in batch, including knowledge
 // from shared KBs the user has access to.
 func (s *knowledgeBaseService) fetchKnowledgeDataWithShared(ctx context.Context,
-	tenantID uint64,
 	knowledgeIDs []string,
 ) (map[string]*types.Knowledge, error) {
-	knowledgeMap, err := s.fetchKnowledgeData(ctx, tenantID, knowledgeIDs)
+	knowledgeMap, err := s.fetchKnowledgeData(ctx, knowledgeIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +53,7 @@ func (s *knowledgeBaseService) fetchKnowledgeDataWithShared(ctx context.Context,
 
 	logger.Infof(ctx, "[fetchKnowledgeDataWithShared] Looking up %d missing knowledge IDs with userID=%s", len(missingIDs), userID)
 	for _, id := range missingIDs {
-		k, err := s.kgRepo.GetKnowledgeByIDOnly(ctx, id)
+		k, err := s.kgRepo.GetKnowledgeByID(ctx, id)
 		if err != nil || k == nil || k.KnowledgeBaseID == "" {
 			logger.Debugf(ctx, "[fetchKnowledgeDataWithShared] Knowledge %s not found or has no KB", id)
 			continue
@@ -80,10 +77,9 @@ func (s *knowledgeBaseService) fetchKnowledgeDataWithShared(ctx context.Context,
 
 // listChunksByIDWithShared fetches chunks by IDs, including chunks from shared KBs the user has access to.
 func (s *knowledgeBaseService) listChunksByIDWithShared(ctx context.Context,
-	tenantID uint64,
 	chunkIDs []string,
 ) ([]*types.Chunk, error) {
-	chunks, err := s.chunkRepo.ListChunksByID(ctx, tenantID, chunkIDs)
+	chunks, err := s.chunkRepo.ListChunksByID(ctx, chunkIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +106,7 @@ func (s *knowledgeBaseService) listChunksByIDWithShared(ctx context.Context,
 	}
 
 	logger.Infof(ctx, "[listChunksByIDWithShared] Looking up %d missing chunks with userID=%s", len(missing), userID)
-	crossChunks, err := s.chunkRepo.ListChunksByIDOnly(ctx, missing)
+	crossChunks, err := s.chunkRepo.ListChunksByID(ctx, missing)
 	if err != nil {
 		logger.Warnf(ctx, "[listChunksByIDWithShared] Failed to fetch chunks by ID only: %v", err)
 		return chunks, nil

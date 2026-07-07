@@ -9,57 +9,64 @@ import (
 
 // KnowledgeTagService defines operations on knowledge base scoped tags.
 type KnowledgeTagService interface {
-	// ListTags lists all tags under a knowledge base with associated statistics.
 	ListTags(ctx context.Context, kbID string, page *types.Pagination, keyword string) (*types.PageResult, error)
-	// CreateTag creates a new tag under a knowledge base.
-	CreateTag(ctx context.Context, kbID string, name string, color string, sortOrder int) (*types.KnowledgeTag, error)
-	// UpdateTag updates tag basic information.
-	UpdateTag(ctx context.Context, id string, name *string, color *string, sortOrder *int) (*types.KnowledgeTag, error)
-	// DeleteTag deletes a tag.
-	// When contentOnly=true, only deletes the content under the tag but keeps the tag itself.
-	// excludeIDs: IDs of chunks to exclude from deletion (only valid when deleting chunks)
+	ListTagTree(ctx context.Context, kbID string) ([]*types.KnowledgeTagTreeNode, error)
+	CreateTag(ctx context.Context, kbID string, parentID string, name string, sort int) (*types.KnowledgeTag, error)
+	UpdateTag(ctx context.Context, id string, name *string, sort *int) (*types.KnowledgeTag, error)
+	MoveTag(ctx context.Context, id string, newParentID string) (*types.KnowledgeTag, error)
 	DeleteTag(ctx context.Context, id string, force bool, contentOnly bool, excludeIDs []string) error
-	// FindOrCreateTagByName finds a tag by name or creates it if not exists.
 	FindOrCreateTagByName(ctx context.Context, kbID string, name string) (*types.KnowledgeTag, error)
-	// ProcessIndexDelete handles async index deletion task
 	ProcessIndexDelete(ctx context.Context, t *asynq.Task) error
+	ShareTag(ctx context.Context, tagID string, groupKey string, sharedByUserID string, permission string) (*types.KnowledgeTagShare, error)
+	RevokeTagShare(ctx context.Context, shareID string, userID string) error
+	ListTagShares(ctx context.Context, tagID string) ([]*types.KnowledgeTagShare, error)
 }
 
 // KnowledgeTagRepository defines persistence operations for tags.
 type KnowledgeTagRepository interface {
 	Create(ctx context.Context, tag *types.KnowledgeTag) error
 	Update(ctx context.Context, tag *types.KnowledgeTag) error
-	GetByID(ctx context.Context, tenantID uint64, id string) (*types.KnowledgeTag, error)
-	// GetBySeqID retrieves a tag by its seq_id.
-	GetBySeqID(ctx context.Context, tenantID uint64, seqID int64) (*types.KnowledgeTag, error)
-	// GetByIDs retrieves multiple tags by their IDs in a single query.
-	GetByIDs(ctx context.Context, tenantID uint64, ids []string) ([]*types.KnowledgeTag, error)
-	// GetBySeqIDs retrieves multiple tags by their seq_ids in a single query.
-	GetBySeqIDs(ctx context.Context, tenantID uint64, seqIDs []int64) ([]*types.KnowledgeTag, error)
-	GetByName(ctx context.Context, tenantID uint64, kbID string, name string) (*types.KnowledgeTag, error)
+	GetByID(ctx context.Context, id string) (*types.KnowledgeTag, error)
+	GetByIDs(ctx context.Context, ids []string) ([]*types.KnowledgeTag, error)
+	GetByName(ctx context.Context, kbID string, parentID string, name string) (*types.KnowledgeTag, error)
 	ListByKB(
 		ctx context.Context,
-		tenantID uint64,
 		kbID string,
 		page *types.Pagination,
 		keyword string,
 	) ([]*types.KnowledgeTag, int64, error)
-	Delete(ctx context.Context, tenantID uint64, id string) error
-	// CountReferences returns number of knowledges and chunks that reference the tag.
+	ListAllByKB(ctx context.Context, kbID string) ([]*types.KnowledgeTag, error)
+	ListChildren(ctx context.Context, parentID string) ([]*types.KnowledgeTag, error)
+	Delete(ctx context.Context, id string) error
 	CountReferences(
 		ctx context.Context,
-		tenantID uint64,
 		kbID string,
 		tagID string,
 	) (knowledgeCount int64, chunkCount int64, err error)
-	// BatchCountReferences returns number of knowledges and chunks for multiple tags in a single query.
-	// Returns a map of tagID -> {knowledgeCount, chunkCount}
 	BatchCountReferences(
 		ctx context.Context,
-		tenantID uint64,
 		kbID string,
 		tagIDs []string,
 	) (map[string]types.TagReferenceCounts, error)
-	// DeleteUnusedTags deletes tags that are not referenced by any knowledge or chunk.
-	DeleteUnusedTags(ctx context.Context, tenantID uint64, kbID string) (int64, error)
+	DeleteUnusedTags(ctx context.Context, kbID string) (int64, error)
+	// AncestorIDs 返回从根节点到该标签节点的祖先链平铺 id 列表（含自身，顺序 root→leaf）。
+	// 供向量库写入 tag_id Array 字段使用：例如路径 a/b/c 返回 [id_a, id_b, id_c]。
+	// id 为空串返回 nil；查不到或查询失败返回 error。
+	AncestorIDs(ctx context.Context, id string) ([]string, error)
+}
+
+// KnowledgeTagShareRepository defines persistence operations for tag shares.
+type KnowledgeTagShareRepository interface {
+	Create(ctx context.Context, share *types.KnowledgeTagShare) error
+	GetByID(ctx context.Context, id string) (*types.KnowledgeTagShare, error)
+	// GetByTagAndGroup looks up a share by (tagID, groupKey).
+	GetByTagAndGroup(ctx context.Context, tagID string, groupKey string) (*types.KnowledgeTagShare, error)
+	Update(ctx context.Context, share *types.KnowledgeTagShare) error
+	Delete(ctx context.Context, id string) error
+	// DeleteByTagID removes all shares for a tag (e.g. when tag is deleted).
+	DeleteByTagID(ctx context.Context, tagID string) error
+	// ListByTagID lists all share records of a tag.
+	ListByTagID(ctx context.Context, tagID string) ([]*types.KnowledgeTagShare, error)
+	// ListByGroupKey lists all share records granted to a group (e.g. organization id).
+	ListByGroupKey(ctx context.Context, groupKey string) ([]*types.KnowledgeTagShare, error)
 }

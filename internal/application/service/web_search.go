@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	infra_web_search "github.com/Tencent/WeKnora/internal/infrastructure/web_search"
 	"github.com/Tencent/WeKnora/internal/config"
+	infra_web_search "github.com/Tencent/WeKnora/internal/infrastructure/web_search"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/searchutil"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -156,10 +156,8 @@ func (s *WebSearchService) CompressWithRAG(
 	}
 	if createdKB == nil {
 		kb := &types.KnowledgeBase{
-			Name:             fmt.Sprintf("tmp-websearch-%d", time.Now().UnixNano()),
-			Description:      "Ephemeral search compression KB",
-			IsTemporary:      true,
-			EmbeddingModelID: cfg.EmbeddingModelID,
+			Name:        fmt.Sprintf("tmp-websearch-%d", time.Now().UnixNano()),
+			Description: "Ephemeral search compression KB",
 		}
 		createdKB, err = kbSvc.CreateKnowledgeBase(ctx, kb)
 		if err != nil {
@@ -196,7 +194,7 @@ func (s *WebSearchService) CompressWithRAG(
 		if body != "" {
 			contentLines = append(contentLines, body)
 		}
-		knowledge, err := knowSvc.CreateKnowledgeFromPassageSync(ctx, createdKB.ID, contentLines, "")
+		knowledge, err := knowSvc.CreateKnowledgeFromPassageSync(ctx, createdKB.ID, contentLines)
 		if err != nil {
 			logger.Warnf(ctx, "failed to ingest passage into temp KB: %v", err)
 			continue

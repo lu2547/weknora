@@ -74,8 +74,6 @@ interface KnowledgeBase {
   type?: 'document' | 'faq'
   knowledge_count?: number
   chunk_count?: number
-  embedding_model_id?: string
-  summary_model_id?: string
 }
 
 const { t } = useI18n()
@@ -103,14 +101,11 @@ const dropdownStyle = ref<Record<string, string>>({})
 const dropdownWidth = props.dropdownWidth ?? 300
 const offsetY = props.offsetY ?? 8
 
-// 过滤：只显示已初始化（有 embedding & summary）的
+// 过滤：按搜索词过滤（模型配置已改为系统级默认，不再逐 KB 校验）
 const filteredKnowledgeBases = computed(() => {
-  const valid = knowledgeBases.value.filter(
-    k => k.embedding_model_id && k.summary_model_id
-  )
-  if (!searchQuery.value) return valid
+  if (!searchQuery.value) return knowledgeBases.value
   const q = searchQuery.value.toLowerCase()
-  return valid.filter(k => k.name.toLowerCase().includes(q))
+  return knowledgeBases.value.filter(k => k.name.toLowerCase().includes(q))
 })
 
 const selectedKbIds = computed(() => settingsStore.settings.selectedKnowledgeBases || [])

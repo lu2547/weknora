@@ -45,18 +45,14 @@ type KnowledgeBaseService interface {
 	// GetKnowledgeBasesByIDsOnly retrieves knowledge bases by IDs without tenant filter (batch).
 	GetKnowledgeBasesByIDsOnly(ctx context.Context, ids []string) ([]*types.KnowledgeBase, error)
 
-	// FillKnowledgeBaseCounts fills KnowledgeCount, ChunkCount, IsProcessing, ProcessingCount for the given KB (uses kb.TenantID).
+	// FillKnowledgeBaseCounts fills ProcessingCount for the given KB.
 	FillKnowledgeBaseCounts(ctx context.Context, kb *types.KnowledgeBase) error
 
-	// ListKnowledgeBases lists all knowledge bases under the current tenant
-	// Parameters:
-	//   - ctx: Context information, containing tenant information
-	// Returns:
-	//   - List of knowledge base objects
-	//   - Possible errors such as insufficient permissions, etc.
+	// CheckModelsConfigured checks models table and returns (embeddingModelID, summaryModelID).
+	CheckModelsConfigured(ctx context.Context) (string, string)
+
+	// ListKnowledgeBases lists all knowledge bases under the current owner
 	ListKnowledgeBases(ctx context.Context) ([]*types.KnowledgeBase, error)
-	// ListKnowledgeBasesByTenantID lists all knowledge bases for a specific tenant (e.g. for shared agent context).
-	ListKnowledgeBasesByTenantID(ctx context.Context, tenantID uint64) ([]*types.KnowledgeBase, error)
 
 	// UpdateKnowledgeBase updates knowledge base information
 	// Parameters:
@@ -97,6 +93,18 @@ type KnowledgeBaseService interface {
 	// associated with the given knowledge base. This allows callers to pre-compute
 	// and reuse embeddings across multiple KBs that share the same model.
 	GetQueryEmbedding(ctx context.Context, kbID string, queryText string) ([]float32, error)
+
+	// SearchKnowledgeSummaries performs a semantic search over the global
+	// weknora_summary collection. The query is embedded using the embedding
+	// model of referenceKBID (which must be one of the KBs being searched) so
+	// all KBs share the same vector space.
+	SearchKnowledgeSummaries(
+		ctx context.Context,
+		referenceKBID string,
+		query string,
+		topK int,
+		filter types.SummaryFilter,
+	) ([]*types.SummaryHit, error)
 
 	// ResolveEmbeddingModelKeys resolves embedding model IDs to their actual
 	// model identity key (name + endpoint). KBs using the same underlying model
@@ -144,24 +152,7 @@ type KnowledgeBaseRepository interface {
 	CreateKnowledgeBase(ctx context.Context, kb *types.KnowledgeBase) error
 
 	// GetKnowledgeBaseByID queries a knowledge base by ID
-	// Parameters:
-	//   - ctx: Context information
-	//   - id: Knowledge base ID
-	// Returns:
-	//   - Knowledge base object, if found
-	//   - Possible errors such as record not existing, database errors, etc.
 	GetKnowledgeBaseByID(ctx context.Context, id string) (*types.KnowledgeBase, error)
-
-	// GetKnowledgeBaseByIDAndTenant queries a knowledge base by ID scoped to a tenant.
-	// Returns ErrKnowledgeBaseNotFound if the KB does not exist or does not belong to the tenant.
-	// Parameters:
-	//   - ctx: Context information
-	//   - id: Knowledge base ID
-	//   - tenantID: Tenant ID (enforces tenant isolation)
-	// Returns:
-	//   - Knowledge base object, if found and owned by tenant
-	//   - Possible errors such as record not existing or wrong tenant, database errors, etc.
-	GetKnowledgeBaseByIDAndTenant(ctx context.Context, id string, tenantID uint64) (*types.KnowledgeBase, error)
 
 	// GetKnowledgeBaseByIDs queries knowledge bases by multiple IDs
 	// Parameters:
@@ -172,22 +163,8 @@ type KnowledgeBaseRepository interface {
 	//   - Possible errors such as database errors, etc.
 	GetKnowledgeBaseByIDs(ctx context.Context, ids []string) ([]*types.KnowledgeBase, error)
 
-	// ListKnowledgeBases lists all knowledge bases in the system
-	// Parameters:
-	//   - ctx: Context information
-	// Returns:
-	//   - List of knowledge base objects
-	//   - Possible errors such as database errors, etc.
+	// ListKnowledgeBases lists all knowledge bases
 	ListKnowledgeBases(ctx context.Context) ([]*types.KnowledgeBase, error)
-
-	// ListKnowledgeBasesByTenantID lists all knowledge bases for a specific tenant
-	// Parameters:
-	//   - ctx: Context information
-	//   - tenantID: Tenant ID
-	// Returns:
-	//   - List of knowledge base objects
-	//   - Possible errors such as database errors, etc.
-	ListKnowledgeBasesByTenantID(ctx context.Context, tenantID uint64) ([]*types.KnowledgeBase, error)
 
 	// UpdateKnowledgeBase updates a knowledge base record
 	// Parameters:
@@ -206,5 +183,5 @@ type KnowledgeBaseRepository interface {
 	DeleteKnowledgeBase(ctx context.Context, id string) error
 
 	// TogglePinKnowledgeBase toggles the pin status of a knowledge base
-	TogglePinKnowledgeBase(ctx context.Context, id string, tenantID uint64) (*types.KnowledgeBase, error)
+	TogglePinKnowledgeBase(ctx context.Context, id string) (*types.KnowledgeBase, error)
 }

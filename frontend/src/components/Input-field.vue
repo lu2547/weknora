@@ -431,10 +431,8 @@ const loadKnowledgeBases = async () => {
   try {
     const response: any = await listKnowledgeBases();
     if (response.data && Array.isArray(response.data)) {
-      const validKbs = response.data.filter((kb: any) =>
-        kb.embedding_model_id && kb.embedding_model_id !== '' &&
-        kb.summary_model_id && kb.summary_model_id !== ''
-      );
+      // 模型配置已改为系统级默认，不再逐 KB 校验 embedding/summary 字段
+      const validKbs = response.data;
       knowledgeBases.value = validKbs;
 
       // 拉取共享知识库（供 @ 提及与清理选中项时识别）

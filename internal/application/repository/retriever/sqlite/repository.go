@@ -160,25 +160,40 @@ func (r *sqliteRepository) EstimateStorageSize(_ context.Context, indexInfoList 
 	return total
 }
 
-func (r *sqliteRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList []string, _ int, _ string) error {
+func (r *sqliteRepository) DeleteByChunkIDList(ctx context.Context, _ string, chunkIDList []string, _ int, _ string) error {
 	var rows []sqliteEmbedding
 	r.db.WithContext(ctx).Where("chunk_id IN ?", chunkIDList).Find(&rows)
 	r.deleteRowsAndVecs(ctx, rows)
 	return r.db.WithContext(ctx).Where("chunk_id IN ?", chunkIDList).Delete(&sqliteEmbedding{}).Error
 }
 
-func (r *sqliteRepository) DeleteBySourceIDList(ctx context.Context, sourceIDList []string, _ int, _ string) error {
+func (r *sqliteRepository) DeleteBySourceIDList(ctx context.Context, _ string, sourceIDList []string, _ int, _ string) error {
 	var rows []sqliteEmbedding
 	r.db.WithContext(ctx).Where("source_id IN ?", sourceIDList).Find(&rows)
 	r.deleteRowsAndVecs(ctx, rows)
 	return r.db.WithContext(ctx).Where("source_id IN ?", sourceIDList).Delete(&sqliteEmbedding{}).Error
 }
 
-func (r *sqliteRepository) DeleteByKnowledgeIDList(ctx context.Context, knowledgeIDList []string, _ int, _ string) error {
+func (r *sqliteRepository) DeleteByKnowledgeIDList(ctx context.Context, _ string, knowledgeIDList []string, _ int, _ string) error {
 	var rows []sqliteEmbedding
 	r.db.WithContext(ctx).Where("knowledge_id IN ?", knowledgeIDList).Find(&rows)
 	r.deleteRowsAndVecs(ctx, rows)
 	return r.db.WithContext(ctx).Where("knowledge_id IN ?", knowledgeIDList).Delete(&sqliteEmbedding{}).Error
+}
+
+// DropKnowledgeBaseCollection is a no-op for sqlite backend (shared table)
+// EnsureCollection is a no-op: sqlite has no Milvus-style collection concept.
+func (r *sqliteRepository) EnsureCollection(ctx context.Context, knowledgeBaseID string, dimension int) error {
+	_ = ctx
+	_ = knowledgeBaseID
+	_ = dimension
+	return nil
+}
+
+func (r *sqliteRepository) DropKnowledgeBaseCollection(ctx context.Context, knowledgeBaseID string) error {
+	_ = ctx
+	_ = knowledgeBaseID
+	return nil
 }
 
 func (r *sqliteRepository) CopyIndices(ctx context.Context,
@@ -216,16 +231,16 @@ func (r *sqliteRepository) CopyIndices(ctx context.Context,
 	return nil
 }
 
-func (r *sqliteRepository) BatchUpdateChunkEnabledStatus(ctx context.Context, chunkStatusMap map[string]bool) error {
+func (r *sqliteRepository) BatchUpdateChunkEnabledStatus(ctx context.Context, _ string, chunkStatusMap map[string]bool) error {
 	for chunkID, enabled := range chunkStatusMap {
 		r.db.WithContext(ctx).Model(&sqliteEmbedding{}).Where("chunk_id = ?", chunkID).Update("is_enabled", enabled)
 	}
 	return nil
 }
 
-func (r *sqliteRepository) BatchUpdateChunkTagID(ctx context.Context, chunkTagMap map[string]string) error {
-	for chunkID, tagID := range chunkTagMap {
-		r.db.WithContext(ctx).Model(&sqliteEmbedding{}).Where("chunk_id = ?", chunkID).Update("tag_id", tagID)
+func (r *sqliteRepository) BatchUpdateChunkTagID(ctx context.Context, _ string, chunkTagMap map[string]types.ChunkTagUpdate) error {
+	for chunkID, upd := range chunkTagMap {
+		r.db.WithContext(ctx).Model(&sqliteEmbedding{}).Where("chunk_id = ?", chunkID).Update("tag_id", types.LeafTagID(upd.TagIDs))
 	}
 	return nil
 }
@@ -328,7 +343,7 @@ func (r *sqliteRepository) keywordsRetrieve(ctx context.Context, params types.Re
 			ChunkID:         row.ChunkID,
 			KnowledgeID:     row.KnowledgeID,
 			KnowledgeBaseID: row.KnowledgeBaseID,
-			TagID:           row.TagID,
+			TagIDs:          types.SingletonTagIDs(row.TagID),
 			Content:         row.Content,
 			Score:           score,
 			MatchType:       types.MatchTypeKeywords,
@@ -420,7 +435,7 @@ func (r *sqliteRepository) vectorRetrieve(ctx context.Context, params types.Retr
 			ChunkID:         v.ChunkID,
 			KnowledgeID:     v.KnowledgeID,
 			KnowledgeBaseID: v.KnowledgeBaseID,
-			TagID:           v.TagID,
+			TagIDs:          types.SingletonTagIDs(v.TagID),
 			Content:         v.Content,
 			Score:           score,
 			MatchType:       types.MatchTypeEmbedding,
@@ -444,7 +459,7 @@ func toSQLiteEmbedding(info *types.IndexInfo) *sqliteEmbedding {
 		ChunkID:         info.ChunkID,
 		KnowledgeID:     info.KnowledgeID,
 		KnowledgeBaseID: info.KnowledgeBaseID,
-		TagID:           info.TagID,
+		TagID:           types.LeafTagID(info.TagIDs),
 		Content:         common.CleanInvalidUTF8(info.Content),
 		Dimension:       0,
 		IsEnabled:       &enabled,

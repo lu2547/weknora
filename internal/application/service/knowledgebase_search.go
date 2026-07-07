@@ -3,73 +3,101 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/logger"
-	"github.com/Tencent/WeKnora/internal/models/embedding"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
-// GetQueryEmbedding computes the query embedding using the embedding model
-// associated with the given knowledge base. Callers can pre-compute and reuse
-// the result across multiple KBs that share the same embedding model to avoid
-// redundant embedding API calls.
+// GetQueryEmbedding computes the query embedding using the system default
+// embedding model. Callers can pre-compute and reuse the result across
+// multiple KBs to avoid redundant embedding API calls.
 func (s *knowledgeBaseService) GetQueryEmbedding(ctx context.Context, kbID string, queryText string) ([]float32, error) {
-	kb, err := s.repo.GetKnowledgeBaseByID(ctx, kbID)
+	// Use system default embedding model (EmbeddingModelID removed from KB)
+	defaultModelID, err := s.getDefaultEmbeddingModelID(ctx)
 	if err != nil {
+		logger.Errorf(ctx, "GetQueryEmbedding: failed to get default embedding model: %v", err)
 		return nil, err
 	}
 
-	currentTenantID := types.MustTenantIDFromContext(ctx)
-	var embeddingModel embedding.Embedder
-
-	if kb.TenantID != currentTenantID {
-		embeddingModel, err = s.modelService.GetEmbeddingModelForTenant(ctx, kb.EmbeddingModelID, kb.TenantID)
-	} else {
-		embeddingModel, err = s.modelService.GetEmbeddingModel(ctx, kb.EmbeddingModelID)
-	}
+	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, defaultModelID)
 	if err != nil {
-		logger.Errorf(ctx, "GetQueryEmbedding: failed to get embedding model %s: %v", kb.EmbeddingModelID, err)
+		logger.Errorf(ctx, "GetQueryEmbedding: failed to get embedding model %s: %v", defaultModelID, err)
 		return nil, err
 	}
 
 	return embeddingModel.Embed(ctx, queryText)
 }
 
-// ResolveEmbeddingModelKeys resolves embedding model IDs to their actual model
-// identity key (name + endpoint). KBs using the same underlying model across
-// different tenants will share the same key, enabling optimal grouping.
-func (s *knowledgeBaseService) ResolveEmbeddingModelKeys(ctx context.Context, kbs []*types.KnowledgeBase) map[string]string {
-	type modelRef struct {
-		ModelID  string
-		TenantID uint64
+// getDefaultEmbeddingModelID returns the system default embedding model ID.
+func (s *knowledgeBaseService) getDefaultEmbeddingModelID(ctx context.Context) (string, error) {
+	models, err := s.modelService.ListModels(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to list models: %w", err)
 	}
-
-	// Deduplicate model references
-	uniqueRefs := make(map[modelRef]struct{})
-	kbRefs := make(map[string]modelRef, len(kbs))
-	for _, kb := range kbs {
-		ref := modelRef{ModelID: kb.EmbeddingModelID, TenantID: kb.TenantID}
-		uniqueRefs[ref] = struct{}{}
-		kbRefs[kb.ID] = ref
-	}
-
-	// Resolve each unique (modelID, tenantID) to a model identity key
-	resolvedKeys := make(map[modelRef]string, len(uniqueRefs))
-	for ref := range uniqueRefs {
-		tenantCtx := context.WithValue(ctx, types.TenantIDContextKey, ref.TenantID)
-		model, err := s.modelService.GetModelByID(tenantCtx, ref.ModelID)
-		if err != nil || model == nil {
-			logger.Warnf(ctx, "ResolveEmbeddingModelKeys: cannot resolve model %s for tenant %d: %v", ref.ModelID, ref.TenantID, err)
-			resolvedKeys[ref] = ref.ModelID
-			continue
+	for _, m := range models {
+		if m.Type == types.ModelTypeEmbedding && m.IsDefault {
+			return m.ID, nil
 		}
-		resolvedKeys[ref] = model.Name + "|" + model.Parameters.BaseURL
+	}
+	// Fallback: first embedding model
+	for _, m := range models {
+		if m.Type == types.ModelTypeEmbedding {
+			return m.ID, nil
+		}
+	}
+	return "", fmt.Errorf("no embedding model configured")
+}
+
+// SearchKnowledgeSummaries performs a semantic search over the global
+// weknora_summary collection. The query is embedded using the embedding
+// model of referenceKBID (which must be one of the KBs being searched)
+// so all KBs in the search scope share the same vector space.
+func (s *knowledgeBaseService) SearchKnowledgeSummaries(
+	ctx context.Context,
+	referenceKBID string,
+	query string,
+	topK int,
+	filter types.SummaryFilter,
+) ([]*types.SummaryHit, error) {
+	if s.summaryIndex == nil {
+		return nil, nil
+	}
+	if topK <= 0 {
+		topK = 5
+	}
+	vec, err := s.GetQueryEmbedding(ctx, referenceKBID, query)
+	if err != nil {
+		return nil, err
+	}
+	return s.summaryIndex.SearchSummaries(ctx, vec, topK, filter)
+}
+
+// ResolveEmbeddingModelKeys resolves embedding model IDs to their actual model
+// identity key (name + endpoint). Since EmbeddingModelID is now system-level,
+// all KBs share the same default embedding model.
+func (s *knowledgeBaseService) ResolveEmbeddingModelKeys(ctx context.Context, kbs []*types.KnowledgeBase) map[string]string {
+	// All KBs use the system default embedding model
+	defaultModelID, err := s.getDefaultEmbeddingModelID(ctx)
+	if err != nil {
+		logger.Warnf(ctx, "ResolveEmbeddingModelKeys: cannot get default embedding model: %v", err)
+		result := make(map[string]string, len(kbs))
+		for _, kb := range kbs {
+			result[kb.ID] = "default"
+		}
+		return result
+	}
+
+	model, err := s.modelService.GetModelByID(ctx, defaultModelID)
+	modelKey := defaultModelID
+	if err == nil && model != nil {
+		modelKey = model.Name + "|" + model.Parameters.BaseURL
 	}
 
 	result := make(map[string]string, len(kbs))
 	for _, kb := range kbs {
-		result[kb.ID] = resolvedKeys[kbRefs[kb.ID]]
+		result[kb.ID] = modelKey
 	}
 	return result
 }
@@ -172,8 +200,22 @@ func (s *knowledgeBaseService) buildRetrievalParams(
 	searchKBIDs []string,
 	matchCount int,
 ) ([]types.RetrieveParams, error) {
-	currentTenantID := types.MustTenantIDFromContext(ctx)
 	var retrieveParams []types.RetrieveParams
+
+	// Resolve KB metadata for the search set so the underlying retrieve engine
+	// (e.g. Milvus) can route to the correct collection without an extra DB
+	// round-trip. Failure is non-fatal: the engine will fall back to its own
+	// KBLookup if needed.
+	var kbMetas []*types.KnowledgeBase
+	if len(searchKBIDs) == 1 && kb != nil && searchKBIDs[0] == kb.ID {
+		kbMetas = []*types.KnowledgeBase{kb}
+	} else if len(searchKBIDs) > 0 {
+		if fetched, err := s.repo.GetKnowledgeBaseByIDs(ctx, searchKBIDs); err == nil {
+			kbMetas = fetched
+		} else {
+			logger.Warnf(ctx, "Failed to fetch KB metadata for retrieve params, falling back to lookup: %v", err)
+		}
+	}
 
 	// Add vector retrieval params if supported
 	if retrieveEngine.SupportRetriever(types.VectorRetrieverType) && !params.DisableVectorMatch {
@@ -185,21 +227,17 @@ func (s *knowledgeBaseService) buildRetrievalParams(
 			queryEmbedding = params.QueryEmbedding
 			logger.Infof(ctx, "Using pre-computed query embedding, vector length: %d", len(queryEmbedding))
 		} else {
-			logger.Infof(ctx, "Getting embedding model, model ID: %s", kb.EmbeddingModelID)
-
-			// Check if this is a cross-tenant shared knowledge base
-			// For shared KB, we must use the source tenant's embedding model to ensure vector compatibility
-			var embeddingModel embedding.Embedder
-			var err error
-			if kb.TenantID != currentTenantID {
-				logger.Infof(ctx, "Cross-tenant knowledge base detected, using source tenant's embedding model. KB tenant: %d, current tenant: %d", kb.TenantID, currentTenantID)
-				embeddingModel, err = s.modelService.GetEmbeddingModelForTenant(ctx, kb.EmbeddingModelID, kb.TenantID)
-			} else {
-				embeddingModel, err = s.modelService.GetEmbeddingModel(ctx, kb.EmbeddingModelID)
-			}
-
+			// Use system default embedding model (EmbeddingModelID removed from KB)
+			defaultModelID, err := s.getDefaultEmbeddingModelID(ctx)
 			if err != nil {
-				logger.Errorf(ctx, "Failed to get embedding model, model ID: %s, error: %v", kb.EmbeddingModelID, err)
+				logger.Errorf(ctx, "Failed to get default embedding model: %v", err)
+				return nil, err
+			}
+			logger.Infof(ctx, "Getting embedding model, model ID: %s", defaultModelID)
+
+			embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, defaultModelID)
+			if err != nil {
+				logger.Errorf(ctx, "Failed to get embedding model, model ID: %s, error: %v", defaultModelID, err)
 				return nil, err
 			}
 			logger.Infof(ctx, "Embedding model retrieved: %v", embeddingModel)
@@ -217,6 +255,7 @@ func (s *knowledgeBaseService) buildRetrievalParams(
 			Query:            params.QueryText,
 			Embedding:        queryEmbedding,
 			KnowledgeBaseIDs: searchKBIDs,
+			KnowledgeBases:   kbMetas,
 			TopK:             matchCount,
 			Threshold:        params.VectorThreshold,
 			RetrieverType:    types.VectorRetrieverType,
@@ -240,6 +279,7 @@ func (s *knowledgeBaseService) buildRetrievalParams(
 		retrieveParams = append(retrieveParams, types.RetrieveParams{
 			Query:            params.QueryText,
 			KnowledgeBaseIDs: searchKBIDs,
+			KnowledgeBases:   kbMetas,
 			TopK:             matchCount,
 			Threshold:        params.KeywordThreshold,
 			RetrieverType:    types.KeywordsRetrieverType,

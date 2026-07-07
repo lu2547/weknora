@@ -18,6 +18,7 @@ import (
 	elasticsearchRetriever "github.com/Tencent/WeKnora/internal/application/repository/retriever/elasticsearch"
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/logger"
+	"github.com/Tencent/WeKnora/internal/types"
 	typesLocal "github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/elastic/go-elasticsearch/v7"
@@ -358,20 +359,35 @@ func (e *elasticsearchRepository) countBulkErrors(ctx context.Context,
 }
 
 // DeleteByChunkIDList Delete indices by chunk ID list
-func (e *elasticsearchRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList []string, dimension int, knowledgeType string) error {
+func (e *elasticsearchRepository) DeleteByChunkIDList(ctx context.Context, _ string, chunkIDList []string, dimension int, knowledgeType string) error {
 	return e.deleteByFieldList(ctx, e.idField("chunk_id"), chunkIDList)
 }
 
 // DeleteBySourceIDList Delete indices by source ID list
-func (e *elasticsearchRepository) DeleteBySourceIDList(ctx context.Context, sourceIDList []string, dimension int, knowledgeType string) error {
+func (e *elasticsearchRepository) DeleteBySourceIDList(ctx context.Context, _ string, sourceIDList []string, dimension int, knowledgeType string) error {
 	return e.deleteByFieldList(ctx, e.idField("source_id"), sourceIDList)
 }
 
 // DeleteByKnowledgeIDList Delete indices by knowledge ID list
 func (e *elasticsearchRepository) DeleteByKnowledgeIDList(ctx context.Context,
-	knowledgeIDList []string, dimension int, knowledgeType string,
+	_ string, knowledgeIDList []string, dimension int, knowledgeType string,
 ) error {
 	return e.deleteByFieldList(ctx, e.idField("knowledge_id"), knowledgeIDList)
+}
+
+// DropKnowledgeBaseCollection is a no-op for elasticsearch v7 backend (shared index)
+// EnsureCollection is a no-op: elasticsearch v7 uses a single shared index.
+func (e *elasticsearchRepository) EnsureCollection(ctx context.Context, knowledgeBaseID string, dimension int) error {
+	_ = ctx
+	_ = knowledgeBaseID
+	_ = dimension
+	return nil
+}
+
+func (e *elasticsearchRepository) DropKnowledgeBaseCollection(ctx context.Context, knowledgeBaseID string) error {
+	_ = ctx
+	_ = knowledgeBaseID
+	return nil
 }
 
 // deleteByFieldList Delete documents by field value list
@@ -1188,7 +1204,7 @@ func (e *elasticsearchRepository) processSingleHit(ctx context.Context,
 		SourceType:      typesLocal.SourceType(sourceType),
 		IsEnabled:       isEnabled,
 		IsRecommended:   isRecommended,
-		TagID:           tagID,
+		TagIDs:          typesLocal.SingletonTagIDs(tagID),
 	}
 
 	return indexInfo, embedding, nil
@@ -1229,6 +1245,7 @@ func (e *elasticsearchRepository) saveCopiedIndices(ctx context.Context, indexIn
 // BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch
 func (e *elasticsearchRepository) BatchUpdateChunkEnabledStatus(
 	ctx context.Context,
+	_ string,
 	chunkStatusMap map[string]bool,
 ) error {
 	log := logger.GetLogger(ctx)
@@ -1328,7 +1345,8 @@ func (e *elasticsearchRepository) BatchUpdateChunkEnabledStatus(
 // BatchUpdateChunkTagID updates the tag ID of chunks in batch
 func (e *elasticsearchRepository) BatchUpdateChunkTagID(
 	ctx context.Context,
-	chunkTagMap map[string]string,
+	_ string,
+	chunkTagMap map[string]types.ChunkTagUpdate,
 ) error {
 	log := logger.GetLogger(ctx)
 	if len(chunkTagMap) == 0 {
@@ -1338,9 +1356,10 @@ func (e *elasticsearchRepository) BatchUpdateChunkTagID(
 
 	log.Infof("[ElasticsearchV7] Batch updating chunk tag ID, count: %d", len(chunkTagMap))
 
-	// Group chunks by tag ID for batch updates
+	// Group chunks by leaf tag ID for batch updates
 	tagGroups := make(map[string][]string)
-	for chunkID, tagID := range chunkTagMap {
+	for chunkID, upd := range chunkTagMap {
+		tagID := types.LeafTagID(upd.TagIDs)
 		tagGroups[tagID] = append(tagGroups[tagID], chunkID)
 	}
 

@@ -60,7 +60,7 @@ func (c *InfoCommand) Execute(ctx context.Context, cmdCtx *CommandContext, _ []s
 	// "selected" uses the explicit KnowledgeBases list, "none"/empty means disabled.
 	sb.WriteString("\n📚 **知识库**\n")
 	if cfg.KBSelectionMode == "all" {
-		kbs, err := c.kbService.ListKnowledgeBasesByTenantID(ctx, cmdCtx.TenantID)
+		kbs, err := c.kbService.ListKnowledgeBases(ctx)
 		if err == nil && len(kbs) > 0 {
 			for _, kb := range kbs {
 				sb.WriteString(fmt.Sprintf("  · %s\n", kb.Name))
@@ -70,7 +70,7 @@ func (c *InfoCommand) Execute(ctx context.Context, cmdCtx *CommandContext, _ []s
 			sb.WriteString("  全部启用\n")
 		}
 	} else if len(cfg.KnowledgeBases) > 0 {
-		kbs, err := c.kbService.ListKnowledgeBasesByTenantID(ctx, cmdCtx.TenantID)
+		kbs, err := c.kbService.ListKnowledgeBases(ctx)
 		if err == nil {
 			nameMap := make(map[string]string, len(kbs))
 			for _, kb := range kbs {

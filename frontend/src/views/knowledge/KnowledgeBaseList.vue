@@ -753,11 +753,18 @@ interface UploadSummary {
   hasError: boolean
 }
 
+// 系统级模型配置状态（从 ListKnowledgeBases 响应级字段获取，非 KB 级）
+const systemEmbeddingModelId = ref('')
+const systemSummaryModelId = ref('')
+
 const fetchList = () => {
   loading.value = true
   return Promise.all([
     listKnowledgeBases().then((res: any) => {
       const data = res.data || []
+      // 读取响应级模型配置状态
+      systemEmbeddingModelId.value = res.embedding_model_id || ''
+      systemSummaryModelId.value = res.summary_model_id || ''
       // 格式化时间，并初始化 showMore 状态
       // is_processing 字段由后端返回
       kbs.value = data.map((kb: any) => ({
@@ -985,13 +992,14 @@ const confirmDelete = () => {
 }
 
 const isInitialized = (kb: KB) => {
-  return !!(kb.embedding_model_id && kb.embedding_model_id !== '' && 
-            kb.summary_model_id && kb.summary_model_id !== '')
+  // 模型已从 KB 级移至系统级，检查 models 表是否配置了 embedding + summary 模型
+  return !!(systemEmbeddingModelId.value && systemSummaryModelId.value)
 }
 
-// 计算是否有未初始化的知识库
+// 计算是否有未初始化的知识库（即系统级模型未配置）
 const hasUninitializedKbs = computed(() => {
-  return kbs.value.some(kb => !isInitialized(kb))
+  if (!kbs.value.length) return false
+  return !(systemEmbeddingModelId.value && systemSummaryModelId.value)
 })
 
 const getKbDisplayName = (kbId: string) => {

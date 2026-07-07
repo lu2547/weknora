@@ -1,4 +1,4 @@
-.PHONY: help build run test clean docker-build-app docker-build-docreader docker-build-frontend docker-build-all docker-run migrate-up migrate-down docker-restart docker-stop start-all stop-all start-ollama stop-ollama build-images build-images-app build-images-docreader build-images-frontend clean-images check-env list-containers pull-images show-platform dev-start dev-stop dev-restart dev-logs dev-status dev-app dev-frontend docs install-swagger
+.PHONY: help build run test clean docker-build-app docker-build-docreader docker-build-frontend docker-build-all docker-run docker-stop docker-restart migrate-up migrate-down migrate-version migrate-create migrate-force migrate-goto build-images build-images-app build-images-docreader build-images-frontend clean-images show-platform restart-infra stop-infra restart-backend restart-all stop-backend dev-logs-app docs install-swagger fmt lint deps build-prod download_spatial clean-db admin-build admin-drop-summary admin-drop-legacy-kb admin-inspect-summary
 
 # Show help
 help:
@@ -10,26 +10,21 @@ help:
 	@echo "  test              运行测试"
 	@echo "  clean             清理构建文件"
 	@echo ""
-	@echo "Docker 命令:"
+	@echo "Docker 镜像构建:"
 	@echo "  docker-build-app       构建应用 Docker 镜像 (wechatopenai/weknora-app)"
 	@echo "  docker-build-docreader 构建文档读取器镜像 (wechatopenai/weknora-docreader)"
 	@echo "  docker-build-frontend  构建前端镜像 (wechatopenai/weknora-ui)"
 	@echo "  docker-build-all       构建所有 Docker 镜像"
-	@echo "  docker-run            运行 Docker 容器"
-	@echo "  docker-stop           停止 Docker 容器"
-	@echo "  docker-restart        重启 Docker 容器"
+	@echo "  build-images           从源码构建所有镜像 (scripts/build_images.sh)"
+	@echo "  clean-images           清理本地镜像"
 	@echo ""
-	@echo "服务管理:"
-	@echo "  start-all         启动所有服务"
-	@echo "  stop-all          停止所有服务"
-	@echo "  start-ollama      仅启动 Ollama 服务"
-	@echo ""
-	@echo "镜像构建:"
-	@echo "  build-images      从源码构建所有镜像"
-	@echo "  build-images-app  从源码构建应用镜像"
-	@echo "  build-images-docreader 从源码构建文档读取器镜像"
-	@echo "  build-images-frontend  从源码构建前端镜像"
-	@echo "  clean-images      清理本地镜像"
+	@echo "本地开发启停（推荐）:"
+	@echo "  restart-infra     启动/重启基础设施容器 (postgres/redis/milvus/docreader)"
+	@echo "  stop-infra        停止基础设施容器"
+	@echo "  restart-backend   重新编译并重启前后端（保持基础设施不变）"
+	@echo "  restart-all       重启基础设施 + 前后端"
+	@echo "  stop-backend      仅停止后端/前端进程"
+	@echo "  dev-logs-app      查看后端实时日志 (/tmp/weknora-app.log)"
 	@echo ""
 	@echo "数据库:"
 	@echo "  migrate-up        执行数据库迁移"
@@ -41,21 +36,7 @@ help:
 	@echo "  deps              安装依赖"
 	@echo "  docs              生成 Swagger API 文档"
 	@echo "  install-swagger   安装 swag 工具"
-	@echo ""
-	@echo "环境检查:"
-	@echo "  check-env         检查环境配置"
-	@echo "  list-containers   列出运行中的容器"
-	@echo "  pull-images       拉取最新镜像"
 	@echo "  show-platform     显示当前构建平台"
-	@echo ""
-	@echo "开发模式（推荐）:"
-	@echo "  dev-start         启动开发环境基础设施（仅启动依赖服务）"
-	@echo "  dev-stop          停止开发环境"
-	@echo "  dev-restart       重启开发环境"
-	@echo "  dev-logs          查看开发环境日志"
-	@echo "  dev-status        查看开发环境状态"
-	@echo "  dev-app           启动后端应用（本地运行，需先运行 dev-start）"
-	@echo "  dev-frontend      启动前端（本地运行，需先运行 dev-start）"
 
 # Go related variables
 BINARY_NAME=WeKnora
@@ -88,6 +69,22 @@ run: build
 test:
 	go test -v ./...
 
+# Build the admin maintenance CLI (Milvus cleanup / inspection)
+admin-build:
+	go build -o weknora-admin ./cmd/admin
+
+# Drop the global weknora_summary collection (used before reingesting summaries)
+admin-drop-summary: admin-build
+	./weknora-admin drop-summary
+
+# Drop the pre-refactor global weknora_kb collection (post-migration cleanup)
+admin-drop-legacy-kb: admin-build
+	./weknora-admin drop-legacy-kb
+
+# Inspect the global weknora_summary collection state
+admin-inspect-summary: admin-build
+	./weknora-admin inspect-summary
+
 # Clean build artifacts
 clean:
 	go clean
@@ -116,29 +113,18 @@ docker-build-frontend:
 # Build all Docker images
 docker-build-all: docker-build-app docker-build-docreader docker-build-frontend
 
-# Run Docker container (传统方式)
+# Run Docker container (compose up)
 docker-run:
-	docker-compose up
+	docker compose up -d
 
-# 使用新脚本启动所有服务
-start-all:
-	./scripts/start_all.sh
-
-# 使用新脚本仅启动Ollama服务
-start-ollama:
-	./scripts/start_all.sh --ollama
-
-# 使用新脚本仅启动Docker容器
-start-docker:
-	./scripts/start_all.sh --docker
-
-# 使用新脚本停止所有服务
-stop-all:
-	./scripts/start_all.sh --stop
-
-# Stop Docker container (传统方式)
+# Stop Docker container
 docker-stop:
-	docker-compose down
+	docker compose down
+
+# Restart Docker container
+docker-restart:
+	docker compose down -t 60
+	docker compose up -d
 
 # 从源码构建镜像相关命令
 build-images:
@@ -155,11 +141,6 @@ build-images-frontend:
 
 clean-images:
 	./scripts/build_images.sh --clean
-
-# Restart Docker container (stop, start)
-docker-restart:
-	docker-compose stop -t 60
-	docker-compose up
 
 # Database migrations
 migrate-up:
@@ -246,43 +227,33 @@ clean-db:
 		docker volume rm weknora_redis_data; \
 	fi
 
-# Environment check
-check-env:
-	./scripts/start_all.sh --check
-
-# List containers
-list-containers:
-	./scripts/start_all.sh --list
-
-# Pull latest images
-pull-images:
-	./scripts/start_all.sh --pull
-
 # Show current platform
 show-platform:
 	@echo "当前系统架构: $(shell uname -m)"
 	@echo "Docker构建平台: $(PLATFORM)"
 
-# Development mode commands
-dev-start:
-	./scripts/dev.sh start
+# ===== 本地开发启停（基础设施 + 前后端）=====
 
-dev-stop:
-	./scripts/dev.sh stop
+# 启动/重启基础设施容器（postgres/redis/milvus/docreader）
+restart-infra:
+	./scripts/restart-infra.sh
 
-dev-restart:
-	./scripts/dev.sh restart
+# 停止基础设施容器
+stop-infra:
+	./scripts/restart-infra.sh --stop
 
-dev-logs:
-	./scripts/dev.sh logs
+# 重新编译并重启前后端（保持基础设施不变）
+restart-backend:
+	./scripts/restart-backend.sh
 
-dev-status:
-	./scripts/dev.sh status
+# 重启前后端 + 同时重启基础设施容器
+restart-all:
+	./scripts/restart-backend.sh --infra
 
-dev-app:
-	./scripts/dev.sh app
+# 仅停止后端/前端进程
+stop-backend:
+	./scripts/restart-backend.sh --stop
 
-dev-frontend:
-	./scripts/dev.sh frontend
-
-
+# 查看后端实时日志
+dev-logs-app:
+	tail -f /tmp/weknora-app.log

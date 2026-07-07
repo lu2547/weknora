@@ -4,10 +4,11 @@ import (
 	"context"
 	"strings"
 
+	"slices"
+
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
-	"slices"
 )
 
 // applyFAQPostProcessing handles FAQ-specific post-processing: iterative retrieval
@@ -67,7 +68,6 @@ func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Co
 	filteredOutChunks := make(map[string]struct{})
 
 	queryTextLower := strings.ToLower(strings.TrimSpace(queryText))
-	tenantID := types.MustTenantIDFromContext(ctx)
 
 	for i := 0; i < maxIterations; i++ {
 		// Update TopK in retrieve params
@@ -109,7 +109,7 @@ func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Co
 
 		// Batch fetch only new chunks
 		if len(newChunkIDs) > 0 {
-			newChunks, err := s.chunkRepo.ListChunksByID(ctx, tenantID, newChunkIDs)
+			newChunks, err := s.chunkRepo.ListChunksByID(ctx, newChunkIDs)
 			if err != nil {
 				logger.Warnf(ctx, "Failed to fetch chunks at iteration %d: %v", i+1, err)
 			} else {
@@ -196,8 +196,6 @@ func (s *knowledgeBaseService) filterByNegativeQuestions(ctx context.Context,
 		return chunks
 	}
 
-	tenantID := types.MustTenantIDFromContext(ctx)
-
 	// Collect chunk IDs
 	chunkIDs := make([]string, 0, len(chunks))
 	for _, chunk := range chunks {
@@ -205,7 +203,7 @@ func (s *knowledgeBaseService) filterByNegativeQuestions(ctx context.Context,
 	}
 
 	// Batch fetch chunks to get negative questions
-	allChunks, err := s.chunkRepo.ListChunksByID(ctx, tenantID, chunkIDs)
+	allChunks, err := s.chunkRepo.ListChunksByID(ctx, chunkIDs)
 	if err != nil {
 		logger.Warnf(ctx, "Failed to fetch chunks for negative question filtering: %v", err)
 		// If we can't fetch chunks, return original results

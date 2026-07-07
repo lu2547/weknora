@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### ⚡ Improvements
+- **GrepChunks: 关键词搜索迁移至 Milvus BM25 全文检索**
+  - `grep_chunks` 工具的关键词搜索后端从 PostgreSQL `LIKE` 查询迁移至 Milvus 内置 BM25 全文检索，显著提升中英文关键词搜索的相关性与性能
+  - Milvus collection schema 中 `content_sparse`（`SparseVector`）字段通过 `text_bm25_emb` BM25 内置 function 与 `content` 字段绑定，写入时自动生成稀疏向量，无需业务层手动计算
+  - `grep_chunks` 支持多 pattern 并行检索，结果按 chunk ID 去重并保留最高 BM25 分数
+  - 保留 PostgreSQL LIKE 作为降级回退路径：当 Milvus 未配置时自动切换，兼容无 Milvus 部署
+  - 新增 Milvus collection schema 自动迁移逻辑：服务启动时检测已有 collection 是否绑定了 BM25 function，如未绑定（旧版 collection）则自动 drop 并重建，确保 BM25 全文检索能力生效（**注意：迁移时 collection 内向量数据将丢失，需重新对文档执行索引**）
+
 ## [0.3.6] - 2026-04-03
 
 ### 🚀 New Features

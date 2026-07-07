@@ -223,7 +223,8 @@ func (h *OrganizationHandler) buildResourceCountsByOrg(ctx context.Context, orgs
 			case "all":
 				tid := agent.TenantID
 				if _, ok := tenantKBCache[tid]; !ok {
-					kbs, err := h.kbService.ListKnowledgeBasesByTenantID(ctx, tid)
+					tidCtx := context.WithValue(ctx, types.TenantIDContextKey, tid)
+					kbs, err := h.kbService.ListKnowledgeBases(tidCtx)
 					if err != nil {
 						logger.Warnf(ctx, "ListKnowledgeBasesByTenantID tenant %d: %v", tid, err)
 						tenantKBCache[tid] = nil
@@ -1189,11 +1190,11 @@ func (h *OrganizationHandler) ListOrgShares(c *gin.Context) {
 			resp.KnowledgeBaseName = s.KnowledgeBase.Name
 			resp.KnowledgeBaseType = s.KnowledgeBase.Type
 			// Get knowledge count for document type
-			if count, err := h.knowledgeRepo.CountKnowledgeByKnowledgeBaseID(ctx, s.SourceTenantID, s.KnowledgeBaseID); err == nil {
+			if count, err := h.knowledgeRepo.CountKnowledgeByKnowledgeBaseID(ctx, s.KnowledgeBaseID); err == nil {
 				resp.KnowledgeCount = count
 			}
 			// Get chunk count for FAQ type
-			if count, err := h.chunkRepo.CountChunksByKnowledgeBaseID(ctx, s.SourceTenantID, s.KnowledgeBaseID); err == nil {
+			if count, err := h.chunkRepo.CountChunksByKnowledgeBaseID(ctx, s.KnowledgeBaseID); err == nil {
 				resp.ChunkCount = count
 			}
 		}
@@ -1434,7 +1435,8 @@ func (h *OrganizationHandler) listSpaceKnowledgeBasesInOrganization(ctx context.
 			}
 			kbIDs = agent.Config.KnowledgeBases
 		case "all":
-			kbs, err := h.kbService.ListKnowledgeBasesByTenantID(ctx, agent.TenantID)
+			agentTenantCtx := context.WithValue(ctx, types.TenantIDContextKey, agent.TenantID)
+			kbs, err := h.kbService.ListKnowledgeBases(agentTenantCtx)
 			if err != nil {
 				logger.Warnf(ctx, "ListKnowledgeBasesByTenantID for agent %s: %v", agent.ID, err)
 				continue
@@ -1465,18 +1467,15 @@ func (h *OrganizationHandler) listSpaceKnowledgeBasesInOrganization(ctx context.
 			if err != nil || kb == nil {
 				continue
 			}
-			if kb.TenantID != sourceTenantID {
-				continue
-			}
 			directKbIDs[kbID] = true
 
 			switch kb.Type {
 			case types.KnowledgeBaseTypeDocument:
-				if count, err := h.knowledgeRepo.CountKnowledgeByKnowledgeBaseID(ctx, sourceTenantID, kb.ID); err == nil {
+				if count, err := h.knowledgeRepo.CountKnowledgeByKnowledgeBaseID(ctx, kb.ID); err == nil {
 					kb.KnowledgeCount = count
 				}
 			case types.KnowledgeBaseTypeFAQ:
-				if count, err := h.chunkRepo.CountChunksByKnowledgeBaseID(ctx, sourceTenantID, kb.ID); err == nil {
+				if count, err := h.chunkRepo.CountChunksByKnowledgeBaseID(ctx, kb.ID); err == nil {
 					kb.ChunkCount = count
 				}
 			}

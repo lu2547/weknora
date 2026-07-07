@@ -64,12 +64,12 @@ var databaseQueryTool = BaseTool{
 
 Query knowledge base information:
 {
-  "sql": "SELECT id, name, description FROM knowledge_bases ORDER BY created_at DESC LIMIT 10"
+  "sql": "SELECT id_knowledge_base as id, name, description FROM knowledge_base ORDER BY created_at DESC LIMIT 10"
 }
 
 Count documents by status:
 {
-  "sql": "SELECT parse_status, COUNT(*) as count FROM knowledges GROUP BY parse_status"
+  "sql": "SELECT parse_status, COUNT(*) as count FROM knowledge GROUP BY parse_status"
 }
 
 Find recent sessions:
@@ -79,12 +79,12 @@ Find recent sessions:
 
 Get storage usage:
 {
-  "sql": "SELECT SUM(storage_size) as total_storage FROM knowledges"
+  "sql": "SELECT SUM(storage_size) as total_storage FROM knowledge"
 }
 
 Join knowledge bases and documents:
 {
-  "sql": "SELECT kb.name as kb_name, COUNT(k.id) as doc_count FROM knowledge_bases kb LEFT JOIN knowledges k ON kb.id = k.knowledge_base_id GROUP BY kb.id, kb.name"
+  "sql": "SELECT kb.name as kb_name, COUNT(k.id_knowledge) as doc_count FROM knowledge_base kb LEFT JOIN knowledge k ON kb.id_knowledge_base = k.id_knowledge_base GROUP BY kb.id_knowledge_base, kb.name"
 }
 
 ## Important Notes

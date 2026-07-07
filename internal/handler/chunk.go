@@ -39,29 +39,20 @@ func (h *ChunkHandler) effectiveCtxForKnowledge(c *gin.Context, knowledgeID stri
 	if err != nil {
 		return nil, errors.NewNotFoundError("Knowledge not found")
 	}
-	if knowledge.TenantID == tenantID {
-		return context.WithValue(ctx, types.TenantIDContextKey, tenantID), nil
-	}
-	if !userExists {
-		return nil, errors.NewForbiddenError("Permission denied to access this knowledge")
-	}
-	if h.kbShareService != nil {
+
+	// TenantID removed from Knowledge - use current tenant context
+	effCtx := context.WithValue(ctx, types.TenantIDContextKey, tenantID)
+
+	// Check shared KB permission if applicable
+	if userExists && h.kbShareService != nil {
 		permission, isShared, permErr := h.kbShareService.CheckUserKBPermission(ctx, knowledge.KnowledgeBaseID, userID.(string))
 		if permErr == nil && isShared {
 			if !permission.HasPermission(requiredPermission) {
 				return nil, errors.NewForbiddenError("Insufficient permission for this operation")
 			}
-			return context.WithValue(ctx, types.TenantIDContextKey, knowledge.TenantID), nil
 		}
 	}
-	if requiredPermission == types.OrgRoleViewer && h.agentShareService != nil {
-		kbRef := &types.KnowledgeBase{ID: knowledge.KnowledgeBaseID, TenantID: knowledge.TenantID}
-		can, err := h.agentShareService.UserCanAccessKBViaSomeSharedAgent(ctx, userID.(string), tenantID, kbRef)
-		if err == nil && can {
-			return context.WithValue(ctx, types.TenantIDContextKey, knowledge.TenantID), nil
-		}
-	}
-	return nil, errors.NewForbiddenError("Permission denied to access this knowledge")
+	return effCtx, nil
 }
 
 // GetChunkByIDOnly godoc

@@ -147,7 +147,7 @@ type SearchParams struct {
 	DisableKeywordsMatch bool      `json:"disable_keywords_match"`
 	DisableVectorMatch   bool      `json:"disable_vector_match"`
 	KnowledgeIDs         []string  `json:"knowledge_ids"`
-	TagIDs               []string  `json:"tag_ids"` // Tag IDs for filtering (used for FAQ priority filtering)
+	TagIDs               []string  `json:"tag_ids"` // 传任意层级的 id_knowledge_tag 都能命中（Milvus ARRAY_CONTAINS_ANY）
 	OnlyRecommended      bool      `json:"only_recommended"`
 	// KnowledgeBaseIDs overrides the single KB ID passed to HybridSearch,
 	// allowing a single retrieval call to span multiple KBs that share the
@@ -157,6 +157,50 @@ type SearchParams struct {
 	// in processSearchResults. Used by the chat pipeline where context assembly
 	// is handled separately in the merge stage.
 	SkipContextEnrichment bool `json:"skip_context_enrichment,omitempty"`
+}
+
+// ChunksSearchRequest is the request body for POST /knowledge-chunks/search.
+// It is a flatter, KB-id-not-in-path variant of SearchParams used by the
+// three-tier KB architecture so callers can search across multiple KBs in a
+// single request without picking a path-level id.
+type ChunksSearchRequest struct {
+	Query            string   `json:"query"`
+	KnowledgeBaseIDs []string `json:"knowledge_base_ids"`
+	TagIDs           []string `json:"tag_ids,omitempty"`
+	KnowledgeIDs     []string `json:"knowledge_ids,omitempty"`
+	TopK             int      `json:"top_k,omitempty"`
+	// UseBM25 controls whether the keyword (BM25) retrieval branch is enabled.
+	// Pointer with omitempty is used so we can distinguish "not set" (default
+	// true) from "explicitly disabled" (false). Vector retrieval is always on.
+	UseBM25 *bool `json:"use_bm25,omitempty"`
+	// VectorThreshold and KeywordThreshold are optional pass-through controls
+	// that map directly to SearchParams of the same name.
+	VectorThreshold  float64 `json:"vector_threshold,omitempty"`
+	KeywordThreshold float64 `json:"keyword_threshold,omitempty"`
+}
+
+// ToSearchParams adapts the ChunksSearchRequest into the existing SearchParams
+// shape consumed by knowledgeBaseService.HybridSearch. Defaults: TopK=10 when
+// missing; UseBM25 defaults to true.
+func (r *ChunksSearchRequest) ToSearchParams() SearchParams {
+	matchCount := r.TopK
+	if matchCount <= 0 {
+		matchCount = 10
+	}
+	disableKeywords := false
+	if r.UseBM25 != nil && !*r.UseBM25 {
+		disableKeywords = true
+	}
+	return SearchParams{
+		QueryText:            r.Query,
+		MatchCount:           matchCount,
+		KnowledgeBaseIDs:     r.KnowledgeBaseIDs,
+		KnowledgeIDs:         r.KnowledgeIDs,
+		TagIDs:               r.TagIDs,
+		VectorThreshold:      r.VectorThreshold,
+		KeywordThreshold:     r.KeywordThreshold,
+		DisableKeywordsMatch: disableKeywords,
+	}
 }
 
 // Value implements the driver.Valuer interface, used to convert SearchResult to database value

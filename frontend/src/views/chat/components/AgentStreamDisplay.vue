@@ -406,6 +406,7 @@ const DOMPurifyConfig = {
 const TOOL_NAME_KEYS: Record<string, string> = {
   search_knowledge: 'agentStream.tools.searchKnowledge',
   knowledge_search: 'agentStream.tools.searchKnowledge',
+  select_documents: 'agentStream.tools.selectDocuments',
   grep_chunks: 'agentStream.tools.grepChunks',
   web_search: 'agentStream.tools.webSearch',
   web_fetch: 'agentStream.tools.webFetch',

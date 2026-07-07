@@ -25,14 +25,14 @@ func (s *knowledgeBaseService) processSearchResults(ctx context.Context,
 
 	// Batch fetch knowledge data (include shared KB so cross-tenant retrieval works)
 	logger.Infof(ctx, "Fetching knowledge data for %d IDs", len(index.knowledgeIDs))
-	knowledgeMap, err := s.fetchKnowledgeDataWithShared(ctx, tenantID, index.knowledgeIDs)
+	knowledgeMap, err := s.fetchKnowledgeDataWithShared(ctx, index.knowledgeIDs)
 	if err != nil {
 		return nil, err
 	}
 
 	// Batch fetch chunks (include shared KB chunks)
 	logger.Infof(ctx, "Fetching chunk data for %d IDs", len(index.chunkIDs))
-	allChunks, err := s.listChunksByIDWithShared(ctx, tenantID, index.chunkIDs)
+	allChunks, err := s.listChunksByIDWithShared(ctx, index.chunkIDs)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
 			"tenant_id": tenantID,
@@ -52,7 +52,7 @@ func (s *knowledgeBaseService) processSearchResults(ctx context.Context,
 		additionalChunkIDs := s.collectEnrichmentChunkIDs(ctx, allChunks, index)
 		if len(additionalChunkIDs) > 0 {
 			logger.Infof(ctx, "Fetching %d additional chunks", len(additionalChunkIDs))
-			additionalChunks, err := s.listChunksByIDWithShared(ctx, tenantID, additionalChunkIDs)
+			additionalChunks, err := s.listChunksByIDWithShared(ctx, additionalChunkIDs)
 			if err != nil {
 				logger.Warnf(ctx, "Failed to fetch some additional chunks: %v", err)
 			} else {
@@ -256,27 +256,27 @@ func (s *knowledgeBaseService) buildSearchResult(chunk *types.Chunk,
 	matchedContent string,
 ) *types.SearchResult {
 	return &types.SearchResult{
-		ID:                chunk.ID,
-		Content:           chunk.Content,
-		KnowledgeID:       chunk.KnowledgeID,
-		ChunkIndex:        chunk.ChunkIndex,
-		KnowledgeTitle:    knowledge.Title,
-		StartAt:           chunk.StartAt,
-		EndAt:             chunk.EndAt,
-		Seq:               chunk.ChunkIndex,
-		Score:             score,
-		MatchType:         matchType,
-		Metadata:          knowledge.GetMetadata(),
-		ChunkType:         string(chunk.ChunkType),
-		ParentChunkID:     chunk.ParentChunkID,
-		ImageInfo:         chunk.ImageInfo,
+		ID:                   chunk.ID,
+		Content:              chunk.Content,
+		KnowledgeID:          chunk.KnowledgeID,
+		ChunkIndex:           chunk.ChunkIndex,
+		KnowledgeTitle:       knowledge.Title,
+		StartAt:              chunk.StartAt,
+		EndAt:                chunk.EndAt,
+		Seq:                  chunk.ChunkIndex,
+		Score:                score,
+		MatchType:            matchType,
+		Metadata:             nil, // Metadata field is raw JSON, not map[string]string
+		ChunkType:            string(chunk.ChunkType),
+		ParentChunkID:        chunk.ParentChunkID,
+		ImageInfo:            chunk.ImageInfo,
 		KnowledgeFilename:    knowledge.FileName,
-		KnowledgeSource:      knowledge.Source,
-		KnowledgeChannel:     knowledge.Channel,
+		KnowledgeSource:      "", // Source field removed from Knowledge
+		KnowledgeChannel:     "", // Channel field removed from Knowledge
 		KnowledgeDescription: knowledge.Description,
-		ChunkMetadata:     chunk.Metadata,
-		MatchedContent:    matchedContent,
-		KnowledgeBaseID:   knowledge.KnowledgeBaseID,
+		ChunkMetadata:        chunk.Metadata,
+		MatchedContent:       matchedContent,
+		KnowledgeBaseID:      knowledge.KnowledgeBaseID,
 	}
 }
 

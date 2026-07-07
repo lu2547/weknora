@@ -1103,11 +1103,9 @@ func (h *TenantHandler) updateTenantChatHistoryConfigInternal(c *gin.Context) {
 	// Auto-create hidden KB if enabled + model set + no KB yet
 	if cfg.Enabled && cfg.EmbeddingModelID != "" && cfg.KnowledgeBaseID == "" {
 		kb := &types.KnowledgeBase{
-			Name:             "__chat_history__",
-			Type:             types.KnowledgeBaseTypeDocument,
-			IsTemporary:      true,
-			Description:      "Auto-managed knowledge base for chat history message indexing",
-			EmbeddingModelID: cfg.EmbeddingModelID,
+			Name:        "__chat_history__",
+			Type:        types.KnowledgeBaseTypeDocument,
+			Description: "Auto-managed knowledge base for chat history message indexing",
 		}
 		createdKB, err := h.kbService.CreateKnowledgeBase(ctx, kb)
 		if err != nil {

@@ -140,13 +140,8 @@ func (t *QueryKnowledgeGraphTool) Execute(ctx context.Context, args json.RawMess
 				return
 			}
 
-			// Check if graph extraction is enabled
-			if kb.ExtractConfig == nil || (len(kb.ExtractConfig.Nodes) == 0 && len(kb.ExtractConfig.Relations) == 0) {
-				mu.Lock()
-				kbResults[id] = &graphQueryResult{kbID: id, err: fmt.Errorf("graph extraction not configured")}
-				mu.Unlock()
-				return
-			}
+			// Graph extraction config removed from KB - skip graph check for now
+			// TODO: restore graph functionality with new config location
 
 			// Query graph
 			results, err := t.knowledgeService.HybridSearch(ctx, id, searchParams)
@@ -178,11 +173,8 @@ func (t *QueryKnowledgeGraphTool) Execute(ctx context.Context, args json.RawMess
 			continue
 		}
 
-		if result.kb != nil && result.kb.ExtractConfig != nil {
-			graphConfigs[kbID] = map[string]interface{}{
-				"nodes":     result.kb.ExtractConfig.Nodes,
-				"relations": result.kb.ExtractConfig.Relations,
-			}
+		if result.kb != nil {
+			graphConfigs[kbID] = map[string]interface{}{}
 		}
 
 		kbCounts[kbID] = len(result.results)

@@ -16,6 +16,9 @@ type PipelineRequest struct {
 	KeywordThreshold float64       `json:"keyword_threshold"`
 	EmbeddingTopK    int           `json:"embedding_top_k"`
 	VectorDatabase   string        `json:"vector_database"`
+	// TagIDs filters retrieval results by id_knowledge_tag。传任意层级的 id
+	// 都能命中该节点及其子孙（Milvus ARRAY_CONTAINS_ANY）。
+	TagIDs []string `json:"tag_ids,omitempty"`
 
 	// Rerank parameters
 	RerankModelID   string  `json:"rerank_model_id"`
@@ -46,12 +49,12 @@ type PipelineRequest struct {
 	ChatModelSupportsVision bool     `json:"-"`
 
 	// Misc request-scoped config
-	TenantID              uint64 `json:"-"`
-	WebSearchEnabled      bool   `json:"-"`
-	WebSearchProviderID   string `json:"-"` // Resolved from agent config or tenant default
-	WebFetchEnabled       bool   `json:"-"` // Auto-fetch full page content for web search results after rerank
-	WebFetchTopN          int    `json:"-"` // Max pages to fetch (default 3)
-	Language              string `json:"-"`
+	TenantID            uint64 `json:"-"`
+	WebSearchEnabled    bool   `json:"-"`
+	WebSearchProviderID string `json:"-"` // Resolved from agent config or tenant default
+	WebFetchEnabled     bool   `json:"-"` // Auto-fetch full page content for web search results after rerank
+	WebFetchTopN        int    `json:"-"` // Max pages to fetch (default 3)
+	Language            string `json:"-"`
 }
 
 // QueryIntent represents the classified intent of a user query.
@@ -140,6 +143,8 @@ func (c *ChatManage) Clone() *ChatManage {
 	knowledgeIDs := make([]string, len(c.KnowledgeIDs))
 	copy(knowledgeIDs, c.KnowledgeIDs)
 
+	tagIDs := append([]string(nil), c.TagIDs...)
+
 	searchTargets := make(SearchTargets, len(c.SearchTargets))
 	for i, t := range c.SearchTargets {
 		if t != nil {
@@ -167,6 +172,7 @@ func (c *ChatManage) Clone() *ChatManage {
 			KeywordThreshold:         c.KeywordThreshold,
 			EmbeddingTopK:            c.EmbeddingTopK,
 			VectorDatabase:           c.VectorDatabase,
+			TagIDs:                   tagIDs,
 			RerankModelID:            c.RerankModelID,
 			RerankTopK:               c.RerankTopK,
 			RerankThreshold:          c.RerankThreshold,
@@ -187,9 +193,9 @@ func (c *ChatManage) Clone() *ChatManage {
 			ChatModelSupportsVision:  c.ChatModelSupportsVision,
 			TenantID:                 c.TenantID,
 			WebSearchEnabled:         c.WebSearchEnabled,
-			WebSearchProviderID:     c.WebSearchProviderID,
-			WebFetchEnabled:         c.WebFetchEnabled,
-			WebFetchTopN:            c.WebFetchTopN,
+			WebSearchProviderID:      c.WebSearchProviderID,
+			WebFetchEnabled:          c.WebFetchEnabled,
+			WebFetchTopN:             c.WebFetchTopN,
 			Language:                 c.Language,
 		},
 		PipelineState: PipelineState{

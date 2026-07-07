@@ -53,6 +53,18 @@
                         <p class="form-tip">{{ $t('knowledgeEditor.basic.typeDescription') }}</p>
                       </div>
                       <div class="form-item">
+                        <label class="form-label required">{{ $t('knowledgeEditor.basic.categoryLabel') }}</label>
+                        <t-radio-group
+                          v-model="formData.category"
+                          :disabled="mode === 'edit'"
+                        >
+                          <t-radio-button value="personal">{{ $t('knowledgeEditor.basic.categoryPersonal') }}</t-radio-button>
+                          <t-radio-button value="public">{{ $t('knowledgeEditor.basic.categoryPublic') }}</t-radio-button>
+                          <t-radio-button value="enterprise">{{ $t('knowledgeEditor.basic.categoryEnterprise') }}</t-radio-button>
+                        </t-radio-group>
+                        <p class="form-tip">{{ $t('knowledgeEditor.basic.categoryDescription') }}</p>
+                      </div>
+                      <div class="form-item">
                         <label class="form-label required">{{ $t('knowledgeEditor.basic.nameLabel') }}</label>
                         <t-input 
                           v-model="formData.name" 
@@ -384,6 +396,9 @@ watch(
 const initFormData = (type: 'document' | 'faq' = 'document') => {
   return {
     type,
+    // 三级知识库类型：personal / public / enterprise。
+    // 底层 Milvus collection 路由依赖此字段，创建后不允许修改。
+    category: 'personal' as 'personal' | 'public' | 'enterprise',
     name: '',
     description: '',
     faqConfig: {
@@ -469,6 +484,8 @@ const loadKBData = async () => {
     const kbType = (kb.type as 'document' | 'faq') || 'document'
     formData.value = {
       type: kbType,
+      // 回填已有知识库类别；edit 模式下控件 disabled，只负责展示。
+      category: ((kb.category as 'personal' | 'public' | 'enterprise') || 'personal'),
       name: kb.name || '',
       description: kb.description || '',
       faqConfig: {
@@ -628,6 +645,8 @@ const buildSubmitData = () => {
     name: formData.value.name,
     description: formData.value.description,
     type: formData.value.type,
+    // 三级知识库类别：后端据此将文档路由到不同 Milvus collection（personal/public 共享，enterprise 独立）。
+    category: formData.value.category || 'personal',
     chunking_config: {
       chunk_size: formData.value.chunkingConfig.chunkSize,
       chunk_overlap: formData.value.chunkingConfig.chunkOverlap,

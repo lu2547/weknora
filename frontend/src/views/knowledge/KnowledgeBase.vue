@@ -20,6 +20,8 @@ import {
   batchQueryKnowledge,
   getKnowledgeBaseById,
   listKnowledgeTags,
+  listKnowledgeTagTree,
+  moveKnowledgeBaseTag,
   updateKnowledgeTagBatch,
   createKnowledgeBaseTag,
   updateKnowledgeBaseTag,
@@ -43,11 +45,8 @@ const folderUploadInputRef = ref<HTMLInputElement | null>(null);
 const uploading = ref(false);
 const kbLoading = ref(false);
 const isFAQ = computed(() => (kbInfo.value?.type || '') === 'faq');
-const missingStorageEngine = computed(() => {
-  if (!kbInfo.value || isFAQ.value) return false
-  const spc = kbInfo.value.storage_provider_config
-  return !spc || !spc.provider
-})
+// 存储引擎默认 local，无需校验
+const missingStorageEngine = computed(() => false)
 const parserEngines = ref<ParserEngineInfo[]>([]);
 
 const supportedFileTypes = computed<Set<string>>(() => {
@@ -108,9 +107,12 @@ const goToParserSettings = () => {
 // Permission control: check if current user owns this KB or has edit/manage permission
 const isOwner = computed(() => {
   if (!kbInfo.value) return false;
-  // Check if the current user's tenant ID matches the KB's tenant ID
-  const userTenantId = authStore.effectiveTenantId;
-  return kbInfo.value.tenant_id === userTenantId;
+  // 三级知识库重构后：所有权由 owner（用户ID）判断，旧的 tenant_id 字段已移除。
+  // 历史数据 owner 可能为空 → 兜底视为 owner（用户能拉到这条KB说明后端已做访问校验）。
+  const owner = (kbInfo.value.owner || '').toString();
+  const me = (authStore.currentUserId || '').toString();
+  if (!owner) return true;
+  return owner === me;
 });
 
 // Can edit: owner, admin, or editor
@@ -188,6 +190,22 @@ let movePollTimer: ReturnType<typeof setInterval> | null = null;
 
 const selectedTagId = ref<string>('');
 const tagList = ref<any[]>([]);
+// Raw hierarchical tag tree as returned by GET /knowledge-bases/:id/tag-tree.
+// Each node carries { id, name, seq_id, parent_id, path, depth, children, ... }.
+const tagTreeRoot = ref<any[]>([]);
+// Controls node expansion state in the sidebar. Default undefined -> treated as expanded.
+// Keyed by tag id (string).
+const tagExpandedMap = ref<Record<string, boolean>>({});
+// When set, the current inline create row will create a child under this parent id.
+const createParentId = ref<string>('');
+const createParentName = ref<string>('');
+// Depth of the inline create row; 0 for a root-level tag, parent.depth + 1 for a child.
+const createParentDepth = ref<number>(0);
+// State for the move-tag dialog.
+const moveTagDialogVisible = ref(false);
+const moveTagSource = ref<any>(null);
+const moveTagTargetParentId = ref<string>('');
+const moveTagSubmitting = ref(false);
 const tagLoading = ref(false);
 const tagSearchQuery = ref('');
 const TAG_PAGE_SIZE = 50;
@@ -328,55 +346,68 @@ const loadKnowledgeFiles = (kbIdValue: string) => {
 const loadTags = async (kbIdValue: string, reset = false) => {
   if (!kbIdValue) {
     tagList.value = [];
+    tagTreeRoot.value = [];
     tagTotal.value = 0;
     tagHasMore.value = false;
     tagPage.value = 1;
     return;
   }
 
+  // Tree endpoint always returns the full tag tree for the KB; pagination
+  // controls are kept as no-ops for backward template compatibility.
   if (reset) {
     tagPage.value = 1;
-    tagList.value = [];
-    tagTotal.value = 0;
-    tagHasMore.value = false;
   }
-
-  const currentPage = tagPage.value || 1;
-  tagLoading.value = currentPage === 1;
-  tagLoadingMore.value = currentPage > 1;
+  tagLoading.value = true;
+  tagLoadingMore.value = false;
+  tagHasMore.value = false;
 
   try {
-    const res: any = await listKnowledgeTags(kbIdValue, {
-      page: currentPage,
-      page_size: TAG_PAGE_SIZE,
-      keyword: tagSearchQuery.value || undefined,
-    });
-    const pageData = (res?.data || {}) as {
-      data?: any[];
-      total?: number;
-    };
-    const pageTags = (pageData.data || []).map((tag: any) => ({
-      ...tag,
-      id: String(tag.id),
-    }));
-
-    if (currentPage === 1) {
-      tagList.value = pageTags;
-    } else {
-      tagList.value = [...tagList.value, ...pageTags];
-    }
-
-    tagTotal.value = pageData.total || tagList.value.length;
-    tagHasMore.value = tagList.value.length < tagTotal.value;
-    if (tagHasMore.value) {
-      tagPage.value = currentPage + 1;
-    }
+    const res: any = await listKnowledgeTagTree(kbIdValue);
+    const rawTree = (res?.data || []) as any[];
+    tagTreeRoot.value = rawTree;
+    rebuildVisibleTags();
   } catch (error) {
     console.error('Failed to load tags', error);
   } finally {
     tagLoading.value = false;
-    tagLoadingMore.value = false;
   }
+};
+
+// Flatten the tag tree into a linear visible list honoring the current
+// expansion state, while annotating each node with depth and children_count
+// for template rendering.
+const rebuildVisibleTags = () => {
+  const out: any[] = [];
+  const walk = (nodes: any[], depth: number) => {
+    for (const n of nodes) {
+      const id = String(n.id);
+      const children = Array.isArray(n.children) ? n.children : [];
+      out.push({
+        ...n,
+        id,
+        depth,
+        children_count: children.length,
+      });
+      const expanded = tagExpandedMap.value[id] !== false;
+      if (children.length && expanded) {
+        walk(children, depth + 1);
+      }
+    }
+  };
+  walk(tagTreeRoot.value || [], 0);
+  tagList.value = out;
+  tagTotal.value = out.length;
+};
+
+const toggleTagExpanded = (tag: any) => {
+  const id = String(tag.id);
+  const current = tagExpandedMap.value[id];
+  tagExpandedMap.value = {
+    ...tagExpandedMap.value,
+    [id]: current === false ? true : false,
+  };
+  rebuildVisibleTags();
 };
 
 const handleTagFilterChange = (value: string) => {
@@ -413,6 +444,32 @@ const startCreateTag = () => {
   }
   editingTagId.value = null;
   editingTagName.value = '';
+  createParentId.value = '';
+  createParentName.value = '';
+  createParentDepth.value = 0;
+  creatingTag.value = true;
+  nextTick(() => {
+    newTagInputRef.value?.focus?.();
+    newTagInputRef.value?.select?.();
+  });
+};
+
+// Start inline create flow as a child of the given parent tag.
+// Ensures the parent branch is expanded so the inline row is visible.
+const startCreateChildTag = (parent: any) => {
+  if (!kbId.value) {
+    MessagePlugin.warning(t('knowledgeEditor.messages.missingId'));
+    return;
+  }
+  editingTagId.value = null;
+  editingTagName.value = '';
+  createParentId.value = parent?.id || '';
+  createParentName.value = parent?.name || '';
+  createParentDepth.value = (parent?.depth ?? -1) + 1;
+  if (parent?.id) {
+    tagExpandedMap.value = { ...tagExpandedMap.value, [String(parent.id)]: true };
+    rebuildVisibleTags();
+  }
   creatingTag.value = true;
   nextTick(() => {
     newTagInputRef.value?.focus?.();
@@ -423,6 +480,9 @@ const startCreateTag = () => {
 const cancelCreateTag = () => {
   creatingTag.value = false;
   newTagName.value = '';
+  createParentId.value = '';
+  createParentName.value = '';
+  createParentDepth.value = 0;
 };
 
 const submitCreateTag = async () => {
@@ -437,7 +497,11 @@ const submitCreateTag = async () => {
   }
   creatingTagLoading.value = true;
   try {
-    await createKnowledgeBaseTag(kbId.value, { name });
+    const payload: { name: string; parent_id?: string } = { name };
+    if (createParentId.value) {
+      payload.parent_id = createParentId.value;
+    }
+    await createKnowledgeBaseTag(kbId.value, payload);
     MessagePlugin.success(t('knowledgeBase.tagCreateSuccess'));
     cancelCreateTag();
     await loadTags(kbId.value);
@@ -538,6 +602,57 @@ const handleKnowledgeTagChange = async (knowledgeId: string, tagValue: string) =
     loadTags(kbId.value);
   } catch (error: any) {
     MessagePlugin.error(error?.message || t('common.operationFailed'));
+  }
+};
+
+// Build a tree data source for <t-tree-select> used by the move-tag dialog.
+// Excludes the source tag itself and its entire subtree to avoid cycles.
+const moveParentTreeData = computed(() => {
+  const excludeId = moveTagSource.value ? String(moveTagSource.value.id) : '';
+  const convert = (nodes: any[]): any[] => {
+    const result: any[] = [];
+    for (const n of nodes) {
+      const id = String(n.id);
+      if (id === excludeId) continue; // skip source and its descendants
+      const kids = Array.isArray(n.children) ? convert(n.children) : [];
+      result.push({ label: n.name, value: id, children: kids.length ? kids : undefined });
+    }
+    return result;
+  };
+  return convert(tagTreeRoot.value || []);
+});
+
+const openMoveTagDialog = (tag: any) => {
+  if (!kbId.value) return;
+  moveTagSource.value = tag;
+  moveTagTargetParentId.value = tag?.parent_id ? String(tag.parent_id) : '';
+  moveTagDialogVisible.value = true;
+};
+
+const closeMoveTagDialog = () => {
+  moveTagDialogVisible.value = false;
+  moveTagSource.value = null;
+  moveTagTargetParentId.value = '';
+};
+
+const submitMoveTag = async () => {
+  if (!kbId.value || !moveTagSource.value) return;
+  const src = moveTagSource.value;
+  const newParent = moveTagTargetParentId.value || '';
+  if (String(src.parent_id || '') === newParent) {
+    closeMoveTagDialog();
+    return;
+  }
+  moveTagSubmitting.value = true;
+  try {
+    await moveKnowledgeBaseTag(kbId.value, src.id, { new_parent_id: newParent });
+    MessagePlugin.success(t('knowledgeBase.tagMoveSuccess'));
+    closeMoveTagDialog();
+    await loadTags(kbId.value);
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || t('common.operationFailed'));
+  } finally {
+    moveTagSubmitting.value = false;
   }
 };
 
@@ -976,14 +1091,11 @@ const ensureDocumentKbReady = () => {
     MessagePlugin.warning(t('knowledgeEditor.messages.missingId'));
     return false;
   }
-  if (!kbInfo.value || !kbInfo.value.embedding_model_id || !kbInfo.value.summary_model_id) {
+  if (!kbInfo.value) {
     MessagePlugin.warning(t('knowledgeBase.notInitialized'));
     return false;
   }
-  if (missingStorageEngine.value) {
-    MessagePlugin.warning(t('knowledgeBase.missingStorageEngineUpload'));
-    return false;
-  }
+  
   return true;
 };
 
@@ -1502,11 +1614,7 @@ async function createNewSession(value: string): Promise<void> {
             <span>{{ $t('knowledgeBase.unsupportedTypesHint', { types: unsupportedFileTypes.map(t => '.' + t).join('、') }) }}</span>
             <span class="parser-hint-link">{{ $t('knowledgeBase.goToParserSettings') }} →</span>
           </p>
-          <p v-if="missingStorageEngine" class="storage-engine-warning" @click="handleOpenKBSettings">
-            <t-icon name="info-circle" class="warning-icon" />
-            <span>{{ $t('knowledgeBase.missingStorageEngine') }}</span>
-            <span class="warning-link">{{ $t('knowledgeBase.goToStorageSettings') }} →</span>
-          </p>
+
         </div>
       </div>
       
@@ -1561,6 +1669,8 @@ async function createNewSession(value: string): Promise<void> {
             <div class="tag-list">
               <div v-if="creatingTag" class="tag-list-item tag-editing" @click.stop>
                 <div class="tag-list-left">
+                  <span class="tag-indent" :style="{ width: (createParentDepth * 14) + 'px' }" aria-hidden="true"></span>
+                  <span class="tag-expand-placeholder" aria-hidden="true"></span>
                   <t-icon name="folder" size="18px" />
                   <div class="tag-edit-input">
                     <t-input
@@ -1568,7 +1678,7 @@ async function createNewSession(value: string): Promise<void> {
                       v-model="newTagName"
                       size="small"
                       :maxlength="40"
-                      :placeholder="$t('knowledgeBase.tagNamePlaceholder')"
+                      :placeholder="createParentName ? ($t('knowledgeBase.tagAddChildAction') + ' - ' + createParentName) : $t('knowledgeBase.tagNamePlaceholder')"
                       @keydown.enter.stop.prevent="submitCreateTag"
                       @keydown.esc.stop.prevent="cancelCreateTag"
                     />
@@ -1606,6 +1716,21 @@ async function createNewSession(value: string): Promise<void> {
                   @click="handleTagRowClick(tag.id)"
                 >
                   <div class="tag-list-left">
+                    <span class="tag-indent" :style="{ width: ((tag.depth || 0) * 14) + 'px' }" aria-hidden="true"></span>
+                    <span
+                      v-if="(tag.children_count || 0) > 0"
+                      class="tag-expand-btn"
+                      role="button"
+                      tabindex="0"
+                      @click.stop="toggleTagExpanded(tag)"
+                      @keydown.enter.stop.prevent="toggleTagExpanded(tag)"
+                    >
+                      <t-icon
+                        :name="tagExpandedMap[tag.id] !== false ? 'chevron-down' : 'chevron-right'"
+                        size="12px"
+                      />
+                    </span>
+                    <span v-else class="tag-expand-placeholder" aria-hidden="true"></span>
                     <t-icon name="folder" size="18px" />
                     <template v-if="editingTagId === tag.id">
                       <div class="tag-edit-input" @click.stop>
@@ -1660,6 +1785,14 @@ async function createNewSession(value: string): Promise<void> {
                                 <t-icon class="menu-icon" name="edit" />
                                 <span>{{ $t('knowledgeBase.tagEditAction') }}</span>
                               </div>
+                              <div class="tag-menu-item" @click="startCreateChildTag(tag)">
+                                <t-icon class="menu-icon" name="add" />
+                                <span>{{ $t('knowledgeBase.tagAddChildAction') }}</span>
+                              </div>
+                              <div class="tag-menu-item" @click="openMoveTagDialog(tag)">
+                                <t-icon class="menu-icon" name="swap" />
+                                <span>{{ $t('knowledgeBase.tagMoveAction') }}</span>
+                              </div>
                               <div class="tag-menu-item danger" @click="confirmDeleteTag(tag)">
                                 <t-icon class="menu-icon" name="delete" />
                                 <span>{{ $t('knowledgeBase.tagDeleteAction') }}</span>
@@ -1688,6 +1821,31 @@ async function createNewSession(value: string): Promise<void> {
             </div>
           </t-loading>
         </aside>
+        <t-dialog
+          v-model:visible="moveTagDialogVisible"
+          :header="$t('knowledgeBase.tagMoveTitle')"
+          :confirm-btn="{ content: $t('common.confirm'), loading: moveTagSubmitting }"
+          :cancel-btn="{ content: $t('common.cancel') }"
+          @confirm="submitMoveTag"
+          @close="closeMoveTagDialog"
+        >
+          <div class="tag-move-body">
+            <div class="tag-move-desc">{{ $t('knowledgeBase.tagMoveDesc') }}</div>
+            <div v-if="moveTagSource" class="tag-move-source">
+              <span class="tag-move-label">{{ $t('knowledgeBase.tagPathLabel') }}:</span>
+              <span class="tag-move-path">{{ moveTagSource.path || ('/' + moveTagSource.name) }}</span>
+            </div>
+            <t-tree-select
+              v-model="moveTagTargetParentId"
+              :data="moveParentTreeData"
+              :placeholder="$t('knowledgeBase.tagParentPlaceholder')"
+              :tree-props="{ expandAll: true }"
+              clearable
+              filterable
+            />
+            <div class="tag-move-hint">{{ $t('knowledgeBase.tagRootNode') }}: <em>{{ $t('knowledgeBase.tagParentPlaceholder') }}</em></div>
+          </div>
+        </t-dialog>
         <div class="tag-content">
           <div class="doc-card-area">
             <!-- 搜索栏、筛选与添加文档 -->
@@ -2211,6 +2369,38 @@ async function createNewSession(value: string): Promise<void> {
           color: var(--td-text-color-secondary);
           font-size: 14px;
           transition: color 0.2s ease;
+        }
+
+        // Hierarchy indent spacer; width is set inline via :style depending on depth.
+        .tag-indent {
+          display: inline-block;
+          flex-shrink: 0;
+        }
+
+        // Clickable chevron toggle for nodes with children.
+        .tag-expand-btn {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 16px;
+          height: 16px;
+          border-radius: 3px;
+          color: var(--td-text-color-secondary);
+          cursor: pointer;
+          flex-shrink: 0;
+          transition: background 0.15s ease;
+        }
+
+        .tag-expand-btn:hover {
+          background: var(--td-bg-color-secondarycontainer);
+        }
+
+        // Placeholder used when a node has no children, keeps alignment consistent.
+        .tag-expand-placeholder {
+          display: inline-block;
+          width: 16px;
+          height: 16px;
+          flex-shrink: 0;
         }
       }
 
@@ -3488,5 +3678,44 @@ async function createNewSession(value: string): Promise<void> {
 
 .del-card {
   vertical-align: middle;
+}
+
+// Move-tag dialog layout.
+.tag-move-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.tag-move-desc {
+  color: var(--td-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.tag-move-source {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--td-bg-color-secondarycontainer);
+}
+
+.tag-move-label {
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+}
+
+.tag-move-path {
+  color: var(--td-text-color-primary);
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.tag-move-hint {
+  color: var(--td-text-color-placeholder);
+  font-size: 12px;
 }
 </style>

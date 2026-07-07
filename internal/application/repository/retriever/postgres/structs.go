@@ -64,7 +64,7 @@ func toDBVectorEmbedding(indexInfo *types.IndexInfo, additionalParams map[string
 		ChunkID:         indexInfo.ChunkID,
 		KnowledgeID:     indexInfo.KnowledgeID,
 		KnowledgeBaseID: indexInfo.KnowledgeBaseID,
-		TagID:           indexInfo.TagID,
+		TagID:           types.LeafTagID(indexInfo.TagIDs),
 		Content:         common.CleanInvalidUTF8(indexInfo.Content),
 		IsEnabled:       indexInfo.IsEnabled,
 	}
@@ -95,7 +95,7 @@ func fromDBVectorEmbeddingWithScore(embedding *pgVectorWithScore, matchType type
 		ChunkID:         embedding.ChunkID,
 		KnowledgeID:     embedding.KnowledgeID,
 		KnowledgeBaseID: embedding.KnowledgeBaseID,
-		TagID:           embedding.TagID,
+		TagIDs:          types.SingletonTagIDs(embedding.TagID),
 		Content:         embedding.Content,
 		Score:           embedding.Score,
 		MatchType:       matchType,

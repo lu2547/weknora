@@ -138,7 +138,7 @@ func (p *PluginSearchEntity) OnEvent(ctx context.Context,
 		logger.Infof(ctx, "No new chunk found")
 		return next()
 	}
-	chunks, err := p.chunkRepo.ListChunksByID(ctx, types.MustTenantIDFromContext(ctx), chunkIDs)
+	chunks, err := p.chunkRepo.ListChunksByID(ctx, chunkIDs)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to list chunks, session_id: %s, error: %v", chatManage.SessionID, err)
 		return next()
@@ -149,7 +149,6 @@ func (p *PluginSearchEntity) OnEvent(ctx context.Context,
 	}
 	knowledges, err := p.knowledgeRepo.GetKnowledgeBatch(
 		ctx,
-		types.MustTenantIDFromContext(ctx),
 		knowledgeIDs,
 	)
 	if err != nil {
@@ -215,13 +214,13 @@ func chunk2SearchResult(chunk *types.Chunk, knowledge *types.Knowledge) *types.S
 		Seq:               chunk.ChunkIndex,
 		Score:             1.0,
 		MatchType:         types.MatchTypeGraph,
-		Metadata:          knowledge.GetMetadata(),
+		Metadata:          nil,
 		ChunkType:         string(chunk.ChunkType),
 		ParentChunkID:     chunk.ParentChunkID,
 		ImageInfo:         chunk.ImageInfo,
 		KnowledgeFilename: knowledge.FileName,
-		KnowledgeSource:   knowledge.Source,
-		KnowledgeChannel:  knowledge.Channel,
+		KnowledgeSource:   knowledge.Type,
+		KnowledgeChannel:  "",
 		ChunkMetadata:     chunk.Metadata,
 		KnowledgeBaseID:   knowledge.KnowledgeBaseID,
 	}

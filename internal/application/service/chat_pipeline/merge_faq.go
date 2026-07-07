@@ -52,7 +52,7 @@ func (p *PluginMerge) populateFAQAnswers(
 		chunkIDs = append(chunkIDs, id)
 	}
 
-	chunks, err := p.chunkRepo.ListChunksByID(ctx, tenantID, chunkIDs)
+	chunks, err := p.chunkRepo.ListChunksByID(ctx, chunkIDs)
 	if err != nil {
 		pipelineWarn(ctx, "Merge", "faq_chunk_fetch_failed", map[string]interface{}{
 			"error": err.Error(),

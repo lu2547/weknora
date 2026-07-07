@@ -40,6 +40,10 @@ type agentService struct {
 	chunkService          interfaces.ChunkService
 	duckdb                *sql.DB
 	webSearchStateService interfaces.WebSearchStateService
+	// milvusRetrieveEngine is the Milvus retrieve engine extracted from the registry.
+	// It is used by GrepChunksTool to perform BM25 full-text search.
+	// May be nil when Milvus is not configured; the tool falls back to PostgreSQL LIKE.
+	milvusRetrieveEngine interfaces.RetrieveEngine
 }
 
 // NewAgentService creates a new agent service
@@ -57,7 +61,15 @@ func NewAgentService(
 	webSearchService interfaces.WebSearchService,
 	duckdb *sql.DB,
 	webSearchStateService interfaces.WebSearchStateService,
+	retrieveEngineRegistry interfaces.RetrieveEngineRegistry,
 ) interfaces.AgentService {
+	// Extract Milvus engine for BM25 grep_chunks support (optional).
+	var milvusRetrieveEngine interfaces.RetrieveEngine
+	if retrieveEngineRegistry != nil {
+		if svc, err := retrieveEngineRegistry.GetRetrieveEngineService(types.MilvusRetrieverEngineType); err == nil && svc != nil {
+			milvusRetrieveEngine = svc
+		}
+	}
 	return &agentService{
 		cfg:                   cfg,
 		modelService:          modelService,
@@ -72,6 +84,7 @@ func NewAgentService(
 		webSearchService:      webSearchService,
 		duckdb:                duckdb,
 		webSearchStateService: webSearchStateService,
+		milvusRetrieveEngine:  milvusRetrieveEngine,
 	}
 }
 
@@ -385,9 +398,11 @@ func (s *agentService) registerTools(
 				chatModel,
 				s.cfg,
 			)
+		case tools.ToolSelectDocuments:
+			toolToRegister = tools.NewSelectDocumentsTool(s.knowledgeBaseService, config.SearchTargets, types.SummaryFilter{})
 		case tools.ToolGrepChunks:
-			toolToRegister = tools.NewGrepChunksTool(s.db, config.SearchTargets)
-			logger.Infof(ctx, "Registered grep_chunks tool with searchTargets: %d targets", len(config.SearchTargets))
+			toolToRegister = tools.NewGrepChunksTool(s.db, s.milvusRetrieveEngine, s.knowledgeService, config.SearchTargets)
+			logger.Infof(ctx, "Registered grep_chunks tool with searchTargets: %d targets (milvusBM25=%v)", len(config.SearchTargets), s.milvusRetrieveEngine != nil)
 		case tools.ToolListKnowledgeChunks:
 			toolToRegister = tools.NewListKnowledgeChunksTool(s.knowledgeService, s.chunkService, config.SearchTargets)
 		case tools.ToolQueryKnowledgeGraph:
@@ -481,7 +496,7 @@ func (s *agentService) getKnowledgeBaseInfos(ctx context.Context, kbIDs []string
 		}
 
 		// Skip hidden/system-managed knowledge bases (e.g., __chat_history__)
-		if kb.IsTemporary {
+		if kb.Type == "__chat_history__" {
 			logger.Debugf(ctx, "Skipping temporary knowledge base %s (%s) from prompt", kb.ID, kb.Name)
 			continue
 		}
@@ -494,7 +509,7 @@ func (s *agentService) getKnowledgeBaseInfos(ctx context.Context, kbIDs []string
 			pageResult, err := s.knowledgeService.ListFAQEntries(ctx, kbID, &types.Pagination{
 				Page:     1,
 				PageSize: 10,
-			}, 0, "", "", "")
+			}, "", "", "", "")
 			if err == nil && pageResult != nil {
 				docCount = int(pageResult.Total)
 				if entries, ok := pageResult.Data.([]*types.FAQEntry); ok {
@@ -574,14 +589,8 @@ func (s *agentService) getSelectedDocumentInfos(ctx context.Context, knowledgeID
 		return []*agent.SelectedDocumentInfo{}, nil
 	}
 
-	// Get tenant ID from context
-	tenantID := uint64(0)
-	if tid, ok := types.TenantIDFromContext(ctx); ok {
-		tenantID = tid
-	}
-
 	// Fetch knowledge metadata (include docs from shared KBs the user has access to)
-	knowledges, err := s.knowledgeService.GetKnowledgeBatchWithSharedAccess(ctx, tenantID, knowledgeIDs)
+	knowledges, err := s.knowledgeService.GetKnowledgeBatchWithSharedAccess(ctx, knowledgeIDs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get knowledge batch: %w", err)
 	}

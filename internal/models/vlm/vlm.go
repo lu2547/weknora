@@ -2,7 +2,6 @@ package vlm
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/models/utils/ollama"
@@ -36,29 +35,4 @@ func NewVLM(config *Config, ollamaService *ollama.OllamaService) (VLM, error) {
 		return NewOllamaVLM(config, ollamaService)
 	}
 	return NewRemoteAPIVLM(config)
-}
-
-// NewVLMFromLegacyConfig creates a VLM from a legacy VLMConfig (inline BaseURL/APIKey/ModelName).
-func NewVLMFromLegacyConfig(vlmCfg types.VLMConfig, ollamaService *ollama.OllamaService) (VLM, error) {
-	if !vlmCfg.IsEnabled() {
-		return nil, fmt.Errorf("VLM config is not enabled")
-	}
-
-	ifType := vlmCfg.InterfaceType
-	if ifType == "" {
-		ifType = "openai"
-	}
-
-	source := types.ModelSourceRemote
-	if strings.EqualFold(ifType, "ollama") {
-		source = types.ModelSourceLocal
-	}
-
-	return NewVLM(&Config{
-		Source:        source,
-		BaseURL:       vlmCfg.BaseURL,
-		ModelName:     vlmCfg.ModelName,
-		APIKey:        vlmCfg.APIKey,
-		InterfaceType: ifType,
-	}, ollamaService)
 }

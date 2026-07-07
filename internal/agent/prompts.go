@@ -232,11 +232,12 @@ func formatSkillsMetadata(skillsMetadata []*skills.SkillMetadata) string {
 
 // formatSelectedDocuments formats selected documents for the prompt (summary only, no content)
 func formatSelectedDocuments(docs []*SelectedDocumentInfo) string {
+	var builder strings.Builder
+
 	if len(docs) == 0 {
-		return ""
+		return builder.String()
 	}
 
-	var builder strings.Builder
 	builder.WriteString("\n### User Selected Documents (via @ mention)\n")
 	builder.WriteString("The user has explicitly selected the following documents. ")
 	builder.WriteString("**You should prioritize searching and retrieving information from these documents when answering.**\n")
@@ -346,8 +347,22 @@ func BuildSystemPromptWithOptions(
 	}
 	basePrompt = renderPromptPlaceholdersWithStatus(template, knowledgeBases, webSearchEnabled, currentTime, language)
 
+	// Append ## Flag: user document/KB selection status
+	hasDocs := len(selectedDocs) > 0
+	hasKBs := len(knowledgeBases) > 0
+	basePrompt += "\n## Flag: 用户文档选择\n"
+	if hasDocs && hasKBs {
+		basePrompt += "用户已 @ 选择了文档，并配置了知识库。\n"
+	} else if hasDocs {
+		basePrompt += "用户已 @ 选择了以下文档。\n"
+	} else if hasKBs {
+		basePrompt += "用户已 @ 选择了知识库。\n"
+	} else {
+		basePrompt += "用户文档选择：未选择文档和知识库。\n"
+	}
+
 	// Append selected documents section if any
-	if len(selectedDocs) > 0 {
+	if hasDocs {
 		basePrompt += formatSelectedDocuments(selectedDocs)
 	}
 

@@ -216,7 +216,7 @@ func (e *elasticsearchRepository) BatchSave(ctx context.Context,
 
 // DeleteByChunkIDList removes documents from the index based on chunk IDs
 // Returns an error if the delete operation fails
-func (e *elasticsearchRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList []string, dimension int, knowledgeType string) error {
+func (e *elasticsearchRepository) DeleteByChunkIDList(ctx context.Context, _ string, chunkIDList []string, dimension int, knowledgeType string) error {
 	log := logger.GetLogger(ctx)
 	if len(chunkIDList) == 0 {
 		log.Warn("[Elasticsearch] Empty chunk ID list provided for deletion, skipping")
@@ -239,7 +239,7 @@ func (e *elasticsearchRepository) DeleteByChunkIDList(ctx context.Context, chunk
 
 // DeleteBySourceIDList removes documents from the index based on source IDs
 // Returns an error if the delete operation fails
-func (e *elasticsearchRepository) DeleteBySourceIDList(ctx context.Context, sourceIDList []string, dimension int, knowledgeType string) error {
+func (e *elasticsearchRepository) DeleteBySourceIDList(ctx context.Context, _ string, sourceIDList []string, dimension int, knowledgeType string) error {
 	log := logger.GetLogger(ctx)
 	if len(sourceIDList) == 0 {
 		log.Warn("[Elasticsearch] Empty source ID list provided for deletion, skipping")
@@ -263,7 +263,7 @@ func (e *elasticsearchRepository) DeleteBySourceIDList(ctx context.Context, sour
 // DeleteByKnowledgeIDList removes documents from the index based on knowledge IDs
 // Returns an error if the delete operation fails
 func (e *elasticsearchRepository) DeleteByKnowledgeIDList(ctx context.Context,
-	knowledgeIDList []string, dimension int, knowledgeType string,
+	_ string, knowledgeIDList []string, dimension int, knowledgeType string,
 ) error {
 	log := logger.GetLogger(ctx)
 	if len(knowledgeIDList) == 0 {
@@ -664,6 +664,7 @@ func (e *elasticsearchRepository) CopyIndices(ctx context.Context,
 // BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch
 func (e *elasticsearchRepository) BatchUpdateChunkEnabledStatus(
 	ctx context.Context,
+	_ string,
 	chunkStatusMap map[string]bool,
 ) error {
 	log := logger.GetLogger(ctx)
@@ -745,7 +746,8 @@ func (e *elasticsearchRepository) BatchUpdateChunkEnabledStatus(
 // BatchUpdateChunkTagID updates the tag ID of chunks in batch
 func (e *elasticsearchRepository) BatchUpdateChunkTagID(
 	ctx context.Context,
-	chunkTagMap map[string]string,
+	_ string,
+	chunkTagMap map[string]typesLocal.ChunkTagUpdate,
 ) error {
 	log := logger.GetLogger(ctx)
 	if len(chunkTagMap) == 0 {
@@ -755,9 +757,10 @@ func (e *elasticsearchRepository) BatchUpdateChunkTagID(
 
 	log.Infof("[Elasticsearch] Batch updating chunk tag ID, count: %d", len(chunkTagMap))
 
-	// Group chunks by tag ID for batch updates
+	// Group chunks by leaf tag ID for batch updates
 	tagGroups := make(map[string][]string)
-	for chunkID, tagID := range chunkTagMap {
+	for chunkID, upd := range chunkTagMap {
+		tagID := typesLocal.LeafTagID(upd.TagIDs)
 		tagGroups[tagID] = append(tagGroups[tagID], chunkID)
 	}
 
@@ -791,5 +794,21 @@ func (e *elasticsearchRepository) BatchUpdateChunkTagID(
 	}
 
 	log.Infof("[Elasticsearch] Successfully batch updated chunk tag ID")
+	return nil
+}
+
+// DropKnowledgeBaseCollection is a no-op for Elasticsearch v8 because it
+// uses a shared index across knowledge bases. Per-KB data cleanup is performed
+// via DeleteByKnowledgeIDList instead.
+// EnsureCollection is a no-op: elasticsearch v8 uses a single shared index.
+func (e *elasticsearchRepository) EnsureCollection(ctx context.Context, knowledgeBaseID string, dimension int) error {
+	_ = ctx
+	_ = knowledgeBaseID
+	_ = dimension
+	return nil
+}
+
+func (e *elasticsearchRepository) DropKnowledgeBaseCollection(ctx context.Context, knowledgeBaseID string) error {
+	logger.GetLogger(ctx).Infof("[Elasticsearch] DropKnowledgeBaseCollection no-op for shared index, kbID=%s", knowledgeBaseID)
 	return nil
 }

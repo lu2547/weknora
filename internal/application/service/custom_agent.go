@@ -20,6 +20,7 @@ var (
 	ErrCannotModifyBuiltin = errors.New("cannot modify built-in agent basic info")
 	ErrCannotDeleteBuiltin = errors.New("cannot delete built-in agent")
 	ErrAgentNameRequired   = errors.New("agent name is required")
+	ErrInvalidTenantID     = errors.New("invalid tenant ID")
 )
 
 // customAgentService implements the CustomAgentService interface
@@ -433,9 +434,8 @@ func (s *customAgentService) GetSuggestedQuestions(
 		limit = 6
 	}
 
-	// Get tenant ID from context
-	tenantID, ok := types.TenantIDFromContext(ctx)
-	if !ok {
+	// Validate tenant context
+	if _, ok := types.TenantIDFromContext(ctx); !ok {
 		return nil, ErrInvalidTenantID
 	}
 
@@ -522,7 +522,7 @@ func (s *customAgentService) GetSuggestedQuestions(
 	}
 
 	// Collect FAQ recommended chunks
-	faqChunks, err := s.chunkRepo.ListRecommendedFAQChunks(ctx, tenantID, queryKBIDs, queryKnowledgeIDs, fetchLimit)
+	faqChunks, err := s.chunkRepo.ListRecommendedFAQChunks(ctx, queryKBIDs, queryKnowledgeIDs, fetchLimit)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
 			"agent_id": agentID,
@@ -549,7 +549,7 @@ func (s *customAgentService) GetSuggestedQuestions(
 	}
 
 	// Collect Document chunks with generated questions
-	docChunks, err := s.chunkRepo.ListRecentDocumentChunksWithQuestions(ctx, tenantID, queryKBIDs, queryKnowledgeIDs, fetchLimit)
+	docChunks, err := s.chunkRepo.ListRecentDocumentChunksWithQuestions(ctx, queryKBIDs, queryKnowledgeIDs, fetchLimit)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
 			"agent_id": agentID,

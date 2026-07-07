@@ -1285,7 +1285,7 @@ const defaultMaxCompletionTokens = ref(2048);
 const defaultTemperature = ref(0.7);
 
 // 知识库相关工具列表
-const knowledgeBaseTools = ['grep_chunks', 'knowledge_search', 'list_knowledge_chunks', 'query_knowledge_graph', 'get_document_info', 'database_query'];
+const knowledgeBaseTools = ['select_documents', 'grep_chunks', 'knowledge_search', 'list_knowledge_chunks', 'query_knowledge_graph', 'get_document_info', 'database_query'];
 
 // 初始化标志，防止初始化时触发 watch 自动添加工具
 const isInitializing = ref(false);
@@ -1303,6 +1303,7 @@ const skillsSelectionMode = ref<'all' | 'selected' | 'none'>('none');
 const allTools = computed(() => [
   { value: 'thinking', label: t('agentEditor.tools.thinking'), description: t('agentEditor.tools.thinkingDesc'), requiresKB: false },
   { value: 'todo_write', label: t('agentEditor.tools.todoWrite'), description: t('agentEditor.tools.todoWriteDesc'), requiresKB: false },
+  { value: 'select_documents', label: t('agentEditor.tools.selectDocuments'), description: t('agentEditor.tools.selectDocumentsDesc'), requiresKB: true },
   { value: 'grep_chunks', label: t('agentEditor.tools.grepChunks'), description: t('agentEditor.tools.grepChunksDesc'), requiresKB: true },
   { value: 'knowledge_search', label: t('agentEditor.tools.knowledgeSearch'), description: t('agentEditor.tools.knowledgeSearchDesc'), requiresKB: true },
   { value: 'list_knowledge_chunks', label: t('agentEditor.tools.listChunks'), description: t('agentEditor.tools.listChunksDesc'), requiresKB: true },
@@ -1781,6 +1782,7 @@ watch(agentMode, (val, _oldVal) => {
         formData.value.config.allowed_tools = [
           'thinking',
           'todo_write',
+          'select_documents',
           'knowledge_search',
           'grep_chunks',
           'list_knowledge_chunks',
