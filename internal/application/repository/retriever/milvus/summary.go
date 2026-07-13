@@ -18,19 +18,22 @@ import (
 // ---------------------------------------------------------------------------
 // Global summary_knowledge_base collection.
 //
-// 严格对齐 docs/milvus_collection 中的权威 summary schema，仅 8 个字段：
-//   id (VarChar 64, PK)            — 独立 UUID，便于幂等 upsert
-//   embedding (FloatVector dim)    — content 的 dense embedding
-//   knowledge_id (VarChar 64)      — 普通索引字段，PG 端按它回拉 title/file_type/created_at
-//   knowledge_base_id (VarChar 64) — 普通索引字段
-//   tag_id (Array<VarChar 64>)     — 标签祖先链平铺数组，ARRAY_CONTAINS_ANY 命中
-//   file_name (VarChar 255)        — 必填
-//   is_enabled (Bool)              — 启用状态过滤
-//   content (VarChar 65535)        — 全文，参与 BM25 + 稠密向量
+// 严格对齐 docs/milvus_collection 中的权威 summary schema：
+//   id (VarChar 64, PK)                    — 独立 UUID，便于幂等 upsert
+//   embedding (FloatVector dim)            — content 的 dense embedding
+//   metadata_embedding (FloatVector dim)   — metadata 的 dense embedding, HNSW(IP)
+//   knowledge_id (VarChar 64)              — 普通索引字段
+//   knowledge_base_id (VarChar 64)         — 普通索引字段
+//   tag_id (Array<VarChar 64>)             — 标签祖先链平铺数组
+//   file_name (VarChar 255)                — 必填
+//   is_enabled (Bool)                      — 启用状态过滤
+//   content (VarChar 65535)                — 全文，参与 BM25 + 稠密向量
+//   metadata (VarChar 65535)               — JSON {"tag_name":[...],"title":"..."}  参与 BM25
 // 自动派生：
-//   content_sparse (SparseFloatVector) — 由内置 BM25 function 从 content 生成
+//   content_sparse (SparseFloatVector)     — 由内置 BM25 function 从 content 生成
+//   metadata_sparse (SparseFloatVector)    — 由内置 BM25 function 从 metadata 生成
 //
-// title / file_type / created_at 不写入 Milvus，仅存 PG（业务层 search 后回查）。
+// title / file_type / created_at 不写入 Milvus，仅存 PG。
 // ---------------------------------------------------------------------------
 
 const (
@@ -38,6 +41,7 @@ const (
 
 	sfID              = "id"
 	sfEmbedding       = "embedding"
+	sfMetaEmbedding   = "metadata_embedding"
 	sfKnowledgeID     = "knowledge_id"
 	sfKnowledgeBaseID = "knowledge_base_id"
 	sfTagID           = "tag_id"
@@ -45,10 +49,12 @@ const (
 	sfIsEnabled       = "is_enabled"
 	sfContent         = "content"
 	sfContentSparse   = "content_sparse"
+	sfMetadata        = "metadata"
+	sfMetadataSparse  = "metadata_sparse"
 )
 
 var summaryOutputFields = []string{
-	sfID, sfKnowledgeID, sfKnowledgeBaseID, sfTagID, sfFileName, sfIsEnabled, sfContent,
+	sfID, sfKnowledgeID, sfKnowledgeBaseID, sfTagID, sfFileName, sfIsEnabled, sfContent, sfMetadata,
 }
 
 // ensureSummaryCollection creates the global summary collection on first use.
@@ -86,6 +92,10 @@ func (m *milvusRepository) ensureSummaryCollection(ctx context.Context, dimensio
 					WithDataType(entity.FieldTypeFloatVector).
 					WithDim(int64(dimension)),
 				entity.NewField().
+					WithName(sfMetaEmbedding).
+					WithDataType(entity.FieldTypeFloatVector).
+					WithDim(int64(dimension)),
+				entity.NewField().
 					WithName(sfContent).
 					WithDataType(entity.FieldTypeVarChar).
 					WithMaxLength(65535).
@@ -93,6 +103,15 @@ func (m *milvusRepository) ensureSummaryCollection(ctx context.Context, dimensio
 					WithEnableMatch(true),
 				entity.NewField().
 					WithName(sfContentSparse).
+					WithDataType(entity.FieldTypeSparseVector),
+				entity.NewField().
+					WithName(sfMetadata).
+					WithDataType(entity.FieldTypeVarChar).
+					WithMaxLength(65535).
+					WithEnableAnalyzer(true).
+					WithEnableMatch(true),
+				entity.NewField().
+					WithName(sfMetadataSparse).
 					WithDataType(entity.FieldTypeSparseVector),
 				entity.NewField().
 					WithName(sfKnowledgeID).
@@ -127,9 +146,18 @@ func (m *milvusRepository) ensureSummaryCollection(ctx context.Context, dimensio
 			WithOutputFields(sfContentSparse).
 			WithType(entity.FunctionTypeBM25))
 
+		// BM25 内置 function：metadata -> metadata_sparse
+		schema.WithFunction(entity.NewFunction().
+			WithName("metadata_bm25_emb").
+			WithInputFields(sfMetadata).
+			WithOutputFields(sfMetadataSparse).
+			WithType(entity.FunctionTypeBM25))
+
 		indexOpts := []client.CreateIndexOption{
 			client.NewCreateIndexOption(summaryCollectionName, sfEmbedding, index.NewHNSWIndex(m.metricType, 16, 128)),
+			client.NewCreateIndexOption(summaryCollectionName, sfMetaEmbedding, index.NewHNSWIndex(entity.IP, 16, 128)),
 			client.NewCreateIndexOption(summaryCollectionName, sfContentSparse, index.NewAutoIndex(entity.BM25)),
+			client.NewCreateIndexOption(summaryCollectionName, sfMetadataSparse, index.NewAutoIndex(entity.BM25)),
 		}
 		for _, f := range []string{sfKnowledgeID, sfKnowledgeBaseID, sfIsEnabled} {
 			indexOpts = append(indexOpts, client.NewCreateIndexOption(summaryCollectionName, f, index.NewAutoIndex(entity.IP)))
@@ -226,7 +254,9 @@ func (m *milvusRepository) UpsertKnowledgeSummary(ctx context.Context, item *typ
 	opt := client.NewColumnBasedInsertOption(summaryCollectionName).
 		WithVarcharColumn(sfID, []string{id}).
 		WithFloatVectorColumn(sfEmbedding, len(item.Vector), [][]float32{item.Vector}).
+		WithFloatVectorColumn(sfMetaEmbedding, len(item.Vector), [][]float32{metadataVector(item)}).
 		WithVarcharColumn(sfContent, []string{truncate(item.Content, 65000)}).
+		WithVarcharColumn(sfMetadata, []string{truncate(item.Metadata, 65000)}).
 		WithVarcharColumn(sfKnowledgeID, []string{item.KnowledgeID}).
 		WithVarcharColumn(sfKnowledgeBaseID, []string{item.KnowledgeBaseID}).
 		WithVarcharColumn(sfFileName, []string{truncate(item.FileName, 250)}).
@@ -454,6 +484,17 @@ func inClause(field string, values []string) string {
 	return fmt.Sprintf("%s in [%s]", field, strings.Join(quoted, ","))
 }
 
+// metadataVector returns the MetadataVector if non-empty, otherwise falls back
+// to a zero vector matching the content embedding dimension (Milvus requires all
+// FloatVector columns to have the same length within one upsert batch).
+func metadataVector(item *types.SummaryItem) []float32 {
+	if len(item.MetadataVector) > 0 {
+		return item.MetadataVector
+	}
+	// fallback: zero-filled vector with same dimension as content embedding
+	return make([]float32, len(item.Vector))
+}
+
 // convertSummaryResultSet maps the Milvus search response into SummaryHit slice.
 // 仅装填 Milvus schema 中存在的字段；title/file_type/created_at 等富字段由调用方按
 // KnowledgeID 回 PG 查询补全。
@@ -491,6 +532,7 @@ func convertSummaryResultSet(resultSet []client.ResultSet) []*types.SummaryHit {
 	readString(sfKnowledgeBaseID, func(i int, v string) { hits[i].KnowledgeBaseID = v })
 	readString(sfFileName, func(i int, v string) { hits[i].FileName = v })
 	readString(sfContent, func(i int, v string) { hits[i].Content = v })
+	readString(sfMetadata, func(i int, v string) { hits[i].Metadata = v })
 
 	// tag_id Array<VarChar>
 	if col := set.GetColumn(sfTagID); col != nil {

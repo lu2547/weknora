@@ -2,10 +2,12 @@ package types
 
 // SummaryItem represents a knowledge-level document summary that will be
 // written to the global summary_knowledge_base Milvus collection.
-// 严格对齐 docs/milvus_collection 中 summary collection 的 8 字段定义：
+// 严格对齐 docs/milvus_collection 中 summary collection 的字段定义：
 //
-//	id / embedding / knowledge_id / knowledge_base_id / tag_id(Array) /
-//	file_name / is_enabled / content + content_sparse(BM25 自动生成)
+//	id / embedding / metadata_embedding / knowledge_id / knowledge_base_id /
+//	tag_id(Array) / file_name / is_enabled /
+//	content + content_sparse(BM25 自动生成) /
+//	metadata + metadata_sparse(BM25 自动生成)
 //
 // title / file_type / created_at 仅存 PG，不入 Milvus。
 type SummaryItem struct {
@@ -30,6 +32,12 @@ type SummaryItem struct {
 	// Vector 是 Content 的 dense embedding，维度 MUST 与 collection 一致。
 	Vector []float32
 
+	// Metadata 是写入 Milvus metadata 字段的 JSON 字符串，参与 BM25 稀疏检索。
+	// 格式: {"tag_name":["标签A","标签B"],"title":"文件名"}
+	Metadata string
+	// MetadataVector 是 Metadata 的 dense embedding，写入 metadata_embedding 字段。
+	MetadataVector []float32
+
 	// ===== 以下字段仅 PG 持久化使用，不写入 Milvus =====
 	// Title 标题（PG 端）
 	Title string
@@ -50,6 +58,7 @@ type SummaryHit struct {
 	TagIDs   []string
 	FileName string
 	Content  string
+	Metadata string
 	Score    float64
 }
 

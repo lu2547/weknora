@@ -2333,6 +2333,30 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 			if embedErr != nil {
 				logger.Warnf(ctx, "Failed to embed summary for knowledge %s: %v", payload.KnowledgeID, embedErr)
 			} else {
+				// 构造 metadata JSON: {"tag_name":[...],"title":"文件名"}
+				var tagNames []string
+				if len(ancestorTagIDs) > 0 {
+					if tags, tagErr := s.tagRepo.GetByIDs(ctx, ancestorTagIDs); tagErr == nil {
+						for _, t := range tags {
+							tagNames = append(tagNames, t.Name)
+						}
+					}
+				}
+				metaObj := map[string]interface{}{
+					"tag_name": tagNames,
+					"title":    knowledge.FileName,
+				}
+				metaBytes, _ := json.Marshal(metaObj)
+				metadataStr := string(metaBytes)
+
+				// embed metadata 得到稠密向量
+				var metadataVec []float32
+				if mv, mvErr := embeddingModel.Embed(ctx, metadataStr); mvErr == nil {
+					metadataVec = mv
+				} else {
+					logger.Warnf(ctx, "Failed to embed metadata for knowledge %s: %v", payload.KnowledgeID, mvErr)
+				}
+
 				item := &types.SummaryItem{
 					ID:              uuid.New().String(),
 					KnowledgeID:     knowledge.ID,
@@ -2342,6 +2366,8 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 					IsEnabled:       true,
 					Content:         summary,
 					Vector:          vector,
+					Metadata:        metadataStr,
+					MetadataVector:  metadataVec,
 					Title:           knowledge.Title,
 					FileType:        knowledge.FileType,
 					CreatedAt:       time.Now().Unix(),
